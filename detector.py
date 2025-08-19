@@ -15,6 +15,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--conf", type=float, default=0.4, help="Confidence threshold")
     parser.add_argument("--crosshair-enable", type=int, default=1, help="Enable crosshair (1/0)")
     parser.add_argument("--crosshair-color", type=str, default="#00ff00", help="Crosshair color hex, e.g. #00ff00")
+    parser.add_argument("--crosshair-image", type=str, default="", help="Path to crosshair PNG (with alpha) to overlay at center")
     parser.add_argument("--window-title", type=str, default="Jetson Overlay", help="OpenCV window title")
     parser.add_argument("--fullscreen", type=int, default=1, help="Fullscreen window (1/0)")
     parser.add_argument("--display", type=int, default=1, help="Display window (1) or run headless (0)")
@@ -51,6 +52,28 @@ def draw_crosshair(frame: np.ndarray, color_bgr: tuple, thickness: int = 2, gap:
     cv2.line(frame, (cx, cy - length), (cx, cy - gap), color_bgr, thickness)
     # Vertical bottom
     cv2.line(frame, (cx, cy + gap), (cx, cy + length), color_bgr, thickness)
+
+
+def overlay_crosshair_image(frame: np.ndarray, crosshair_bgra: np.ndarray) -> None:
+    fh, fw = frame.shape[:2]
+    ch, cw = crosshair_bgra.shape[:2]
+    x = max(0, (fw - cw) // 2)
+    y = max(0, (fh - ch) // 2)
+    x2 = min(fw, x + cw)
+    y2 = min(fh, y + ch)
+    cw_eff = x2 - x
+    ch_eff = y2 - y
+    if cw_eff <= 0 or ch_eff <= 0:
+        return
+    roi = frame[y:y2, x:x2]
+    ch_rgba = crosshair_bgra[0:ch_eff, 0:cw_eff]
+    if ch_rgba.shape[2] == 4:
+        overlay_rgb = ch_rgba[:, :, :3]
+        alpha = ch_rgba[:, :, 3:4].astype(float) / 255.0
+        inv_alpha = 1.0 - alpha
+        roi[...] = (alpha * overlay_rgb + inv_alpha * roi).astype(roi.dtype)
+    else:
+        cv2.addWeighted(ch_rgba, 1.0, roi, 0.0, 0.0, dst=roi)
 
 
 def main() -> int:
@@ -92,6 +115,14 @@ def main() -> int:
             cv2.setWindowProperty(args.window_title, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
 
     color_bgr = hex_to_bgr(args.crosshair_color)
+    crosshair_bgra = None
+    if args.crosshair_enable and args.crosshair_image:
+        try:
+            ch_img = cv2.imread(args.crosshair_image, cv2.IMREAD_UNCHANGED)
+            if ch_img is not None:
+                crosshair_bgra = ch_img
+        except Exception:
+            crosshair_bgra = None
     running = True
 
     def handle_sigterm(signum, frame):  # noqa: ARG001
@@ -128,7 +159,10 @@ def main() -> int:
 
         # Draw crosshair if enabled
         if args.crosshair_enable:
-            draw_crosshair(frame, color_bgr=color_bgr, thickness=2, gap=12, length=50)
+            if crosshair_bgra is not None:
+                overlay_crosshair_image(frame, crosshair_bgra)
+            else:
+                draw_crosshair(frame, color_bgr=color_bgr, thickness=2, gap=12, length=50)
 
         if args.display:
             cv2.imshow(args.window_title, frame)

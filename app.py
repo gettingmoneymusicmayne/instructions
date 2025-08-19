@@ -30,10 +30,10 @@ HTML = """
 <h2>Overlay Control</h2>
 <form method="post">
   <div style="margin-top: 10px;">
-    <label><input type="checkbox" name="enable_crosshair" checked> Show crosshair</label>
+    <label><input type="checkbox" name="enable_crosshair" %ENABLE_CROSSHAIR%> Show crosshair</label>
   </div>
   <div>
-    <label><input type="checkbox" name="enable_detection"> Show detection boxes (YOLO)</label>
+    <label><input type="checkbox" name="enable_detection" %ENABLE_DETECTION%> Show detection boxes (YOLO)</label>
   </div>
   <div style="margin-top: 10px;">
     <button type="submit">Apply & Launch</button>
@@ -148,14 +148,21 @@ def index():
 
         # Orchestrate processes based on selection
         if enable_detection:
+            # Use a single low-latency GStreamer + cairooverlay + YOLO process
+            stop_gst()
+            stop_detector()
+            DETECTOR_CMD = [
+                "python3", os.path.join(BASE_DIR, "gst_yolo_overlay.py"),
+                "--device", "/dev/video0",
+                "--width", "1920", "--height", "1080", "--fps", "60",
+                "--model", "yolo11n.pt",
+                "--conf", "0.4",
+            ]
             if enable_crosshair:
-                # Keep low-latency GStreamer overlay; run detector headless in parallel
-                launch_gst_overlay(CROSSHAIR_PATH, offset_x, offset_y)
-                launch_detector(display_output=False)
-            else:
-                # Detection only (shows detector window)
-                stop_gst()
-                launch_detector(display_output=True)
+                DETECTOR_CMD.extend(["--crosshair", CROSSHAIR_PATH])
+            # Run as detector process for lifecycle mgmt
+            global DETECTOR_PROC
+            DETECTOR_PROC = subprocess.Popen(DETECTOR_CMD)
         else:
             # Use gst overlay if only crosshair is desired
             stop_detector()
@@ -164,9 +171,13 @@ def index():
             else:
                 stop_gst()
 
-        return redirect(url_for("index"))
+        return redirect(url_for("index", ec=int(enable_crosshair), ed=int(enable_detection)))
 
-    return render_template_string(HTML)
+    ec = request.args.get("ec", default="1")
+    ed = request.args.get("ed", default="0")
+    html = HTML.replace("%ENABLE_CROSSHAIR%", "checked" if ec == "1" else "")
+    html = html.replace("%ENABLE_DETECTION%", "checked" if ed == "1" else "")
+    return render_template_string(html)
 
 
 @app.route("/preview")

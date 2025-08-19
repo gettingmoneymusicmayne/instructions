@@ -11,18 +11,19 @@ from PIL import Image
 
 app = Flask(__name__)
 
-# Fixed project directory as requested
-BASE_DIR = "/home/opulentpro/Documents/crosshair-dashboard"
-# User-provided crosshair image (no auto-generation)
+# Project directory based on this file's location
+BASE_DIR = os.path.dirname(__file__)
+# Paths
 CROSSHAIR_PATH = os.path.join(BASE_DIR, "crosshair.png")
 SCRIPT_PATH = os.path.join(BASE_DIR, "launch_overlay.sh")
+DISPLAY_PATH = os.path.join(BASE_DIR, "cv_display.py")
 PREVIEW_FOLDER = os.path.join(BASE_DIR, "static")
 
+# Capture device
+DEVICE_PATH = os.environ.get("CAPTURE_DEVICE", "/dev/video0")
 
 # Runtime process handles
-DETECTOR_PROC: Optional[subprocess.Popen] = None
-GST_PROC: Optional[subprocess.Popen] = None
-
+DISPLAY_PROC: Optional[subprocess.Popen] = None
 
 HTML = """
 <!doctype html>
@@ -47,7 +48,6 @@ HTML = """
 
 
 def ensure_directories() -> None:
-    os.makedirs(BASE_DIR, exist_ok=True)
     os.makedirs(PREVIEW_FOLDER, exist_ok=True)
 
 
@@ -58,65 +58,43 @@ def crosshair_size() -> tuple[int, int]:
         return im.size
 
 
-def cleanup_old_crosshairs() -> None:
-    # No-op now; we no longer generate timestamped crosshairs
-    pattern = os.path.join(BASE_DIR, "crosshair_*.png")
-    for path in glob.glob(pattern):
+def stop_display() -> None:
+    global DISPLAY_PROC
+    if DISPLAY_PROC is not None:
         try:
-            os.remove(path)
-        except Exception:
-            pass
-
-
-def stop_gst() -> None:
-    global GST_PROC
-    try:
-        subprocess.run(["pkill", "-f", "gst-launch-1.0"], check=False)
-    except Exception:
-        pass
-    if GST_PROC is not None:
-        try:
-            GST_PROC.terminate()
-        except Exception:
-            pass
-        GST_PROC = None
-
-
-def stop_detector() -> None:
-    global DETECTOR_PROC
-    if DETECTOR_PROC is not None:
-        try:
-            DETECTOR_PROC.send_signal(signal.SIGTERM)
+            DISPLAY_PROC.send_signal(signal.SIGTERM)
             try:
-                DETECTOR_PROC.wait(timeout=3)
+                DISPLAY_PROC.wait(timeout=3)
             except subprocess.TimeoutExpired:
-                DETECTOR_PROC.kill()
+                DISPLAY_PROC.kill()
         except Exception:
             pass
-        DETECTOR_PROC = None
+        DISPLAY_PROC = None
 
 
-def launch_gst_overlay(crosshair_path: str, offset_x: int, offset_y: int) -> None:
-    global GST_PROC
-    stop_gst()
+def launch_crosshair_only(crosshair_path: str, offset_x: int, offset_y: int) -> None:
+    global DISPLAY_PROC
+    stop_display()
     if not os.path.isfile(SCRIPT_PATH):
         raise FileNotFoundError(f"launch script not found: {SCRIPT_PATH}")
-    GST_PROC = subprocess.Popen(["/bin/bash", SCRIPT_PATH, crosshair_path, str(offset_x), str(offset_y)])
+    DISPLAY_PROC = subprocess.Popen([
+        "/bin/bash", SCRIPT_PATH, crosshair_path, str(offset_x), str(offset_y)
+    ])
 
 
-def launch_detector(display_output: bool) -> None:
-    global DETECTOR_PROC
-    stop_detector()
-    args = [
-        "python3", os.path.join(BASE_DIR, "detector.py"),
-        "--device", "/dev/video0",
+def launch_both_single_window(device_path: str, crosshair_path: str) -> None:
+    global DISPLAY_PROC
+    stop_display()
+    if not os.path.isfile(DISPLAY_PATH):
+        raise FileNotFoundError(f"display script not found: {DISPLAY_PATH}")
+    DISPLAY_PROC = subprocess.Popen([
+        "python3", DISPLAY_PATH,
+        "--device", device_path,
+        "--width", "1920", "--height", "1080", "--fps", "60",
         "--model", "yolo11n.pt",
         "--conf", "0.4",
-        "--fullscreen", "1" if display_output else "0",
-        "--window-title", "Detector" if display_output else "",
-        "--display", "1" if display_output else "0",
-    ]
-    DETECTOR_PROC = subprocess.Popen(args)
+        "--crosshair", crosshair_path,
+    ])
 
 
 @app.before_request
@@ -125,7 +103,7 @@ def init_app():
     if not os.path.exists(CROSSHAIR_PATH):
         return (
             "<h1>Error:</h1>"
-            "<p>Crosshair image not found. Please add <code>crosshair.png</code> in /home/opulentpro/Documents/crosshair-dashboard.</p>",
+            "<p>Crosshair image not found. Please add <code>crosshair.png</code> in this directory.</p>",
             500,
         )
 
@@ -144,36 +122,14 @@ def index():
         video_w, video_h = 1920, 1080
         offset_x = max(0, (video_w - cw) // 2)
         offset_y = max(0, (video_h - ch) // 2)
-        cleanup_old_crosshairs()
 
-        # Orchestrate processes based on selection
         if enable_detection:
-            # Use tee-based low-latency display (crosshair + display) + detector reading frames via shm
-            stop_gst()
-            stop_detector()
-            gst_off_x, gst_off_y = offset_x, offset_y
-            display_cmd = [
-                "/bin/bash", os.path.join(BASE_DIR, "display_tee.sh"),
-                "/dev/video0", CROSSHAIR_PATH, str(gst_off_x), str(gst_off_y), "1920", "1080", "60"
-            ]
-            detector_cmd = [
-                "python3", os.path.join(BASE_DIR, "detector_shm.py"),
-                "--model", "yolo11n.pt",
-                "--conf", "0.4",
-                "--width", "1920", "--height", "1080", "--fps", "60",
-                "--crosshair", CROSSHAIR_PATH
-            ]
-            global GST_PROC, DETECTOR_PROC
-            GST_PROC = subprocess.Popen(display_cmd)
-            time.sleep(0.4)
-            DETECTOR_PROC = subprocess.Popen(detector_cmd)
+            launch_both_single_window(DEVICE_PATH, CROSSHAIR_PATH)
         else:
-            # Use gst overlay if only crosshair is desired
-            stop_detector()
             if enable_crosshair:
-                launch_gst_overlay(CROSSHAIR_PATH, offset_x, offset_y)
+                launch_crosshair_only(CROSSHAIR_PATH, offset_x, offset_y)
             else:
-                stop_gst()
+                stop_display()
 
         return redirect(url_for("index", ec=int(enable_crosshair), ed=int(enable_detection)))
 
@@ -193,14 +149,12 @@ def preview():
 
 @app.route("/stop")
 def stop_all():
-    stop_detector()
-    stop_gst()
+    stop_display()
     return redirect(url_for("index"))
 
 
 if __name__ == "__main__":
     try:
-        app.run(host="0.0.0.0", port=5000, debug=False, use_reloader=False)
+        app.run(host="127.0.0.1", port=5000, debug=False, use_reloader=False)
     finally:
-        stop_detector()
-        stop_gst()
+        stop_display()

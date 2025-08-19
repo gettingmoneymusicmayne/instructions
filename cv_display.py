@@ -19,6 +19,12 @@ def parse_args():
     p.add_argument("--imgsz", type=int, default=512, help="Inference size (short side), e.g., 320/416/512/640")
     p.add_argument("--compute_device", default="0", help="Ultralytics device: 0 for CUDA GPU, 'cpu' for CPU")
     p.add_argument("--half", type=int, default=1, help="Use FP16 on CUDA (1/0)")
+    p.add_argument("--display_backend", choices=["opencv", "gstreamer"], default="gstreamer",
+                   help="Display backend for final output (gstreamer reduces tearing vs OpenCV)")
+    p.add_argument("--gst_sink", default="glimagesink",
+                   help="GStreamer sink (glimagesink, xvimagesink, nveglglessink). Default glimagesink")
+    p.add_argument("--gst_sync", type=int, default=0,
+                   help="GStreamer sink sync flag (0=no vsync for lowest latency, 1=vsync for smoothness)")
     return p.parse_args()
 
 
@@ -65,8 +71,26 @@ def main() -> int:
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, args.height)
         cap.set(cv2.CAP_PROP_FPS, args.fps)
 
-    cv2.namedWindow("Display", cv2.WINDOW_NORMAL)
-    cv2.setWindowProperty("Display", cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+    # Prepare display backend
+    writer = None
+    use_opencv_display = (getattr(args, "display_backend", "gstreamer") == "opencv")
+    if use_opencv_display:
+        cv2.namedWindow("Display", cv2.WINDOW_NORMAL)
+        cv2.setWindowProperty("Display", cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+    else:
+        sync_flag = "true" if int(getattr(args, "gst_sync", 0)) else "false"
+        gst_display_pipeline = (
+            f"appsrc is-live=true do-timestamp=true block=true ! "
+            f"video/x-raw,format=BGR,width={args.width},height={args.height},framerate={args.fps}/1 ! "
+            f"queue leaky=downstream max-size-buffers=1 ! videoconvert ! {args.gst_sink} sync={sync_flag}"
+        )
+        writer = cv2.VideoWriter(gst_display_pipeline, cv2.CAP_GSTREAMER, 0, float(args.fps), (args.width, args.height))
+        if not writer.isOpened():
+            # Fallback to OpenCV window
+            writer = None
+            use_opencv_display = True
+            cv2.namedWindow("Display", cv2.WINDOW_NORMAL)
+            cv2.setWindowProperty("Display", cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
 
     # Try to minimize internal buffering (may be ignored depending on backend)
     try:
@@ -131,6 +155,10 @@ def main() -> int:
     t = threading.Thread(target=inference_worker, daemon=True)
     t.start()
 
+    # Simple frame pacing to make output cadence consistent when not using vsync
+    target_dt = 1.0 / float(args.fps)
+    next_deadline = time.monotonic()
+
     while running:
         ok, frame = cap.read()
         if not ok:
@@ -187,13 +215,24 @@ def main() -> int:
                 else:
                     roi[:, :, :3] = ch_crop[:, :, :3]
 
-        cv2.imshow("Display", frame)
-        key = cv2.waitKey(1) & 0xFF
-        if key == 27 or key == ord('q'):
-            break
+        if use_opencv_display:
+            cv2.imshow("Display", frame)
+            key = cv2.waitKey(1) & 0xFF
+            if key == 27 or key == ord('q'):
+                break
+        else:
+            # Frame pacing without vsync
+            now = time.monotonic()
+            if now < next_deadline:
+                time.sleep(max(0.0, next_deadline - now))
+            writer.write(frame)
+            next_deadline += target_dt
 
     cap.release()
-    cv2.destroyAllWindows()
+    if use_opencv_display:
+        cv2.destroyAllWindows()
+    if writer is not None:
+        writer.release()
     return 0
 
 

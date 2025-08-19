@@ -17,6 +17,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--crosshair-color", type=str, default="#00ff00", help="Crosshair color hex, e.g. #00ff00")
     parser.add_argument("--window-title", type=str, default="Jetson Overlay", help="OpenCV window title")
     parser.add_argument("--fullscreen", type=int, default=1, help="Fullscreen window (1/0)")
+    parser.add_argument("--display", type=int, default=1, help="Display window (1) or run headless (0)")
     parser.add_argument("--width", type=int, default=1920, help="Target capture width")
     parser.add_argument("--height", type=int, default=1080, help="Target capture height")
     parser.add_argument("--fps", type=int, default=60, help="Target capture FPS")
@@ -85,9 +86,10 @@ def main() -> int:
         cap.set(cv2.CAP_PROP_FPS, args.fps)
 
     # Window setup
-    cv2.namedWindow(args.window_title, cv2.WINDOW_NORMAL)
-    if args.fullscreen:
-        cv2.setWindowProperty(args.window_title, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+    if args.display:
+        cv2.namedWindow(args.window_title, cv2.WINDOW_NORMAL)
+        if args.fullscreen:
+            cv2.setWindowProperty(args.window_title, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
 
     color_bgr = hex_to_bgr(args.crosshair_color)
     running = True
@@ -128,12 +130,14 @@ def main() -> int:
         if args.crosshair_enable:
             draw_crosshair(frame, color_bgr=color_bgr, thickness=2, gap=12, length=50)
 
-        cv2.imshow(args.window_title, frame)
+        if args.display:
+            cv2.imshow(args.window_title, frame)
 
         # Keep UI responsive
-        key = cv2.waitKey(1) & 0xFF
-        if key == 27 or key == ord('q'):
-            break
+        if args.display:
+            key = cv2.waitKey(1) & 0xFF
+            if key == 27 or key == ord('q'):
+                break
 
         # Simple pacing
         now = time.time()
@@ -142,7 +146,8 @@ def main() -> int:
         last_infer = now
 
     cap.release()
-    cv2.destroyAllWindows()
+    if args.display:
+        cv2.destroyAllWindows()
     return 0
 
 

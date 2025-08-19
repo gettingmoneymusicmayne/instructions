@@ -148,20 +148,25 @@ def index():
 
         # Orchestrate processes based on selection
         if enable_detection:
-            # Use a single low-latency GStreamer + cairooverlay + YOLO process
+            # Use shm-decoupled display + detector for robust caps and low latency
             stop_gst()
             stop_detector()
+            DISPLAY_CMD = [
+                "/bin/bash", os.path.join(BASE_DIR, "display_both.sh"),
+                "/dev/video0", "1920", "1080", "60"
+            ]
             DETECTOR_CMD = [
-                "python3", os.path.join(BASE_DIR, "gst_yolo_overlay.py"),
-                "--device", "/dev/video0",
-                "--width", "1920", "--height", "1080", "--fps", "60",
+                "python3", os.path.join(BASE_DIR, "detector_shm.py"),
                 "--model", "yolo11n.pt",
                 "--conf", "0.4",
+                "--width", "1920", "--height", "1080", "--fps", "60",
             ]
             if enable_crosshair:
                 DETECTOR_CMD.extend(["--crosshair", CROSSHAIR_PATH])
-            # Run as detector process for lifecycle mgmt
-            global DETECTOR_PROC
+            # Start display first so shmsink is listening
+            global GST_PROC, DETECTOR_PROC
+            GST_PROC = subprocess.Popen(DISPLAY_CMD)
+            time.sleep(0.5)
             DETECTOR_PROC = subprocess.Popen(DETECTOR_CMD)
         else:
             # Use gst overlay if only crosshair is desired

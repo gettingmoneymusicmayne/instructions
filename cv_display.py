@@ -16,6 +16,9 @@ def parse_args():
     p.add_argument("--model", default="yolo11n.pt")
     p.add_argument("--conf", type=float, default=0.4)
     p.add_argument("--crosshair", default="")
+    p.add_argument("--imgsz", type=int, default=512, help="Inference size (short side), e.g., 320/416/512/640")
+    p.add_argument("--compute-device", default="0", help="Ultralytics device: 0 for CUDA GPU, 'cpu' for CPU")
+    p.add_argument("--half", type=int, default=1, help="Use FP16 on CUDA (1/0)")
     return p.parse_args()
 
 
@@ -86,6 +89,19 @@ def main() -> int:
 
     def inference_worker():
         nonlocal running, latest_det_input, latest_boxes
+        predict_kwargs = {
+            "verbose": False,
+            "conf": args.conf,
+            "classes": [0],
+            "imgsz": args.imgsz,
+        }
+        # Device/precision preferences
+        if args.compute-device.lower() != "cpu":
+            predict_kwargs["device"] = 0
+            if args.half:
+                predict_kwargs["half"] = True
+        else:
+            predict_kwargs["device"] = "cpu"
         while running:
             # Get the most recent small image to process
             with shared_lock:
@@ -98,7 +114,7 @@ def main() -> int:
                 continue
             # Run inference
             det_rgb = cv2.cvtColor(det_img, cv2.COLOR_BGR2RGB)
-            results = model.predict(det_rgb, verbose=False, conf=args.conf, classes=[0])
+            results = model.predict(det_rgb, **predict_kwargs)
             boxes_scaled = []
             if results and len(results) > 0 and results[0].boxes is not None and results[0].boxes.xyxy is not None:
                 b = results[0].boxes
@@ -120,7 +136,7 @@ def main() -> int:
 
         # Prepare a downscaled frame for detection (decoupled from display)
         h, w = frame.shape[:2]
-        target_w = 640
+        target_w = max(160, min(args.imgsz, 1280))
         if w <= target_w:
             small = frame
             sx = 1.0

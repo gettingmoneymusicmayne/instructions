@@ -95,8 +95,11 @@ def launch_both_single_window(device_path: str, crosshair_path: str) -> None:
         "--conf", "0.4",
         "--crosshair", crosshair_path,
         "--imgsz", "512",
-        "--compute_device", "cpu",
+        "--compute-device", "cpu",
         "--half", "0",
+        "--display_backend", "gstreamer",
+        "--gst_sink", "glimagesink",
+        "--gst_sync", "0",
     ])
 
 

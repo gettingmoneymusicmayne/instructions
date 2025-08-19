@@ -17,7 +17,10 @@ def parse_args():
     p.add_argument("--conf", type=float, default=0.4)
     p.add_argument("--crosshair", default="")
     p.add_argument("--imgsz", type=int, default=512, help="Inference size (short side), e.g., 320/416/512/640")
-    p.add_argument("--compute_device", default="0", help="Ultralytics device: 0 for CUDA GPU, 'cpu' for CPU")
+    # Accept BOTH hyphen and underscore forms; normalize to compute_device
+    p.add_argument("--compute-device", dest="compute_device", default="0",
+                   help="Ultralytics device: 0 for CUDA GPU, 'cpu' for CPU")
+    p.add_argument("--compute_device", dest="compute_device", default="0", help=argparse.SUPPRESS)
     p.add_argument("--half", type=int, default=1, help="Use FP16 on CUDA (1/0)")
     p.add_argument("--display_backend", choices=["opencv", "gstreamer"], default="gstreamer",
                    help="Display backend for final output (gstreamer reduces tearing vs OpenCV)")

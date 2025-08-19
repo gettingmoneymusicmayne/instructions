@@ -8,8 +8,8 @@ import gi
 gi.require_version("Gst", "1.0")
 gi.require_version("GstVideo", "1.0")
 gi.require_version("GObject", "2.0")
-gi.require_version("Gtk", "3.0")
-from gi.repository import Gst, GObject  # noqa: E402
+gi.require_version("GLib", "2.0")
+from gi.repository import Gst, GObject, GLib  # noqa: E402
 
 
 def parse_args():
@@ -91,21 +91,79 @@ def main():
     Gst.init(None)
     GObject.threads_init()
 
-    pipeline_desc = (
-        f"v4l2src device={args.device} ! "
-        f"video/x-raw,format=YUY2,width={args.width},height={args.height},framerate={args.fps}/1 ! "
-        f"queue leaky=2 max-size-buffers=1 ! tee name=t "
-        # Display branch: convert to BGRA for cairooverlay, then to sink
-        f"t. ! queue leaky=2 max-size-buffers=1 ! videoconvert ! video/x-raw,format=BGRA ! "
-        f"cairooverlay name=overlay ! xvimagesink sync=false "
-        # Appsink branch: BGR for OpenCV
-        f"t. ! queue leaky=2 max-size-buffers=1 ! videoconvert ! video/x-raw,format=BGR ! "
-        f"appsink name=appsink drop=true max-buffers=1 emit-signals=true sync=false"
+    # Prepare multiple pipeline options to handle different device formats
+    pipeline_options = []
+    # 1) Raw caps (let kernel choose raw pixel format)
+    pipeline_options.append(
+        (
+            "raw",
+            (
+                f"v4l2src device={args.device} ! "
+                f"video/x-raw,width={args.width},height={args.height},framerate={args.fps}/1 ! "
+                f"queue leaky=2 max-size-buffers=1 ! tee name=t "
+                f"t. ! queue leaky=2 max-size-buffers=1 ! videoconvert ! video/x-raw,format=BGRA ! cairooverlay name=overlay ! xvimagesink sync=false "
+                f"t. ! queue leaky=2 max-size-buffers=1 ! videoconvert ! video/x-raw,format=BGR ! appsink name=appsink drop=true max-buffers=1 emit-signals=true sync=false"
+            ),
+        )
+    )
+    # 2) MJPEG decode path
+    pipeline_options.append(
+        (
+            "mjpeg",
+            (
+                f"v4l2src device={args.device} ! "
+                f"image/jpeg,width={args.width},height={args.height},framerate={args.fps}/1 ! jpegdec ! "
+                f"queue leaky=2 max-size-buffers=1 ! tee name=t "
+                f"t. ! queue leaky=2 max-size-buffers=1 ! videoconvert ! video/x-raw,format=BGRA ! cairooverlay name=overlay ! xvimagesink sync=false "
+                f"t. ! queue leaky=2 max-size-buffers=1 ! videoconvert ! video/x-raw,format=BGR ! appsink name=appsink drop=true max-buffers=1 emit-signals=true sync=false"
+            ),
+        )
+    )
+    # 3) Minimal constraints
+    pipeline_options.append(
+        (
+            "auto",
+            (
+                f"v4l2src device={args.device} ! queue leaky=2 max-size-buffers=1 ! tee name=t "
+                f"t. ! queue leaky=2 max-size-buffers=1 ! videoconvert ! video/x-raw,format=BGRA ! cairooverlay name=overlay ! xvimagesink sync=false "
+                f"t. ! queue leaky=2 max-size-buffers=1 ! videoconvert ! video/x-raw,format=BGR ! appsink name=appsink drop=true max-buffers=1 emit-signals=true sync=false"
+            ),
+        )
     )
 
-    pipeline = Gst.parse_launch(pipeline_desc)
-    overlay = pipeline.get_by_name("overlay")
-    appsink = pipeline.get_by_name("appsink")
+    pipeline = None
+    chosen = None
+    overlay = None
+    appsink = None
+    for name, desc in pipeline_options:
+        try:
+            candidate = Gst.parse_launch(desc)
+            # Probe by setting to PAUSED first
+            ret = candidate.set_state(Gst.State.PAUSED)
+            if ret == Gst.StateChangeReturn.FAILURE:
+                candidate.set_state(Gst.State.NULL)
+                continue
+            # Wait briefly for negotiation
+            bus = candidate.get_bus()
+            msg = bus.timed_pop_filtered(2_000_000_000, Gst.MessageType.ERROR | Gst.MessageType.ASYNC_DONE | Gst.MessageType.STATE_CHANGED)
+            if msg and msg.type == Gst.MessageType.ERROR:
+                candidate.set_state(Gst.State.NULL)
+                continue
+            # Success; finalize
+            pipeline = candidate
+            overlay = pipeline.get_by_name("overlay")
+            appsink = pipeline.get_by_name("appsink")
+            chosen = name
+            break
+        except Exception:
+            try:
+                candidate.set_state(Gst.State.NULL)
+            except Exception:
+                pass
+            continue
+    if pipeline is None:
+        print("Failed to build a working pipeline (raw/mjpeg/auto). Check device and plugins.")
+        return 5
 
     state = SharedState()
 
@@ -157,7 +215,7 @@ def main():
 
     bus.connect("message", on_message)
 
-    loop = GObject.MainLoop()
+    loop = GLib.MainLoop()
     pipeline.set_state(Gst.State.PLAYING)
     try:
         loop.run()

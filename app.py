@@ -11,7 +11,8 @@ from PIL import Image, ImageDraw
 
 app = Flask(__name__)
 
-BASE_DIR = os.path.dirname(__file__)
+# Fixed project directory as requested
+BASE_DIR = "/home/opulentpro/Documents/crosshair-dashboard"
 BASE_PATH = os.path.join(BASE_DIR, "crosshair_base.png")
 SCRIPT_PATH = os.path.join(BASE_DIR, "launch_overlay.sh")
 PREVIEW_FOLDER = os.path.join(BASE_DIR, "static")
@@ -50,6 +51,7 @@ HTML = """
 
 
 def ensure_directories() -> None:
+    os.makedirs(BASE_DIR, exist_ok=True)
     os.makedirs(PREVIEW_FOLDER, exist_ok=True)
 
 

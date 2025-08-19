@@ -94,6 +94,9 @@ def launch_both_single_window(device_path: str, crosshair_path: str) -> None:
         "--model", "yolo11n.pt",
         "--conf", "0.4",
         "--crosshair", crosshair_path,
+        "--imgsz", "512",
+        "--compute_device", "cpu",
+        "--half", "0",
     ])
 
 

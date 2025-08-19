@@ -49,12 +49,17 @@ def main():
     fps = max(1, args.fps)
 
     # SHM read (capture frames)
-    cap = cv2.VideoCapture("shmsrc socket-path=/tmp/capture_bgr do-timestamp=true is-live=true ! "
-                           "video/x-raw,format=BGR,width=%d,height=%d,framerate=%d/1 ! appsink drop=true max-buffers=1" % (width, height, fps),
-                           cv2.CAP_GSTREAMER)
-    if not cap.isOpened():
-        print("Failed to open shared capture", file=sys.stderr)
-        return 4
+    cap = None
+    while True:
+        cap = cv2.VideoCapture(
+            "shmsrc socket-path=/tmp/capture_bgr do-timestamp=true is-live=true ! "
+            "video/x-raw,format=BGR,width=%d,height=%d,framerate=%d/1 ! appsink drop=true max-buffers=1" % (width, height, fps),
+            cv2.CAP_GSTREAMER,
+        )
+        if cap.isOpened():
+            break
+        print("Waiting for capture shared memory /tmp/capture_bgr ...", file=sys.stderr)
+        time.sleep(0.3)
 
     # SHM write (overlay frames)
     writer = cv2.VideoWriter(

@@ -13,6 +13,7 @@ FPS="${4:-60}"
 
 # Clean old sockets
 rm -f /tmp/capture_bgr /tmp/overlay_bgra || true
+mkfifo /tmp/overlay_bgra || true
 
 gst-launch-1.0 -e \
   v4l2src device="$DEVICE" io-mode=0 ! \

@@ -1,6 +1,7 @@
 import argparse
 import signal
 import time
+import threading
 
 import cv2
 import numpy as np
@@ -61,9 +62,20 @@ def main() -> int:
     cv2.namedWindow("Display", cv2.WINDOW_NORMAL)
     cv2.setWindowProperty("Display", cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
 
+    # Try to minimize internal buffering (may be ignored depending on backend)
+    try:
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    except Exception:
+        pass
+
     cross = load_crosshair_bgra(args.crosshair)
 
     running = True
+
+    # Shared state between capture/display thread (main) and inference thread
+    shared_lock = threading.Lock()
+    latest_det_input = {"img": None, "scale_x": 1.0, "scale_y": 1.0}
+    latest_boxes = []  # list of (x1,y1,x2,y2)
 
     def handle_stop(signum, frame):
         nonlocal running
@@ -72,20 +84,66 @@ def main() -> int:
     signal.signal(signal.SIGINT, handle_stop)
     signal.signal(signal.SIGTERM, handle_stop)
 
+    def inference_worker():
+        nonlocal running, latest_det_input, latest_boxes
+        while running:
+            # Get the most recent small image to process
+            with shared_lock:
+                det_img = latest_det_input["img"]
+                sx = latest_det_input["scale_x"]
+                sy = latest_det_input["scale_y"]
+                latest_det_input["img"] = None
+            if det_img is None:
+                time.sleep(0.001)
+                continue
+            # Run inference
+            det_rgb = cv2.cvtColor(det_img, cv2.COLOR_BGR2RGB)
+            results = model.predict(det_rgb, verbose=False, conf=args.conf, classes=[0])
+            boxes_scaled = []
+            if results and len(results) > 0 and results[0].boxes is not None and results[0].boxes.xyxy is not None:
+                b = results[0].boxes
+                xyxy = b.xyxy.cpu().numpy()
+                for (x1, y1, x2, y2) in xyxy:
+                    # Scale back to full-res coordinates
+                    boxes_scaled.append((int(x1 * sx), int(y1 * sy), int(x2 * sx), int(y2 * sy)))
+            with shared_lock:
+                latest_boxes = boxes_scaled
+
+    t = threading.Thread(target=inference_worker, daemon=True)
+    t.start()
+
     while running:
         ok, frame = cap.read()
         if not ok:
             time.sleep(0.001)
             continue
 
-        # YOLO inference
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        results = model.predict(rgb, verbose=False, conf=args.conf, classes=[0])
-        if results and len(results) > 0 and results[0].boxes is not None and results[0].boxes.xyxy is not None:
-            b = results[0].boxes
-            xyxy = b.xyxy.cpu().numpy().astype(int)
-            for (x1, y1, x2, y2) in xyxy:
-                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 255), 2)
+        # Prepare a downscaled frame for detection (decoupled from display)
+        h, w = frame.shape[:2]
+        target_w = 640
+        if w <= target_w:
+            small = frame
+            sx = 1.0
+            sy = 1.0
+        else:
+            scale = target_w / float(w)
+            det_w = target_w
+            det_h = max(1, int(h * scale))
+            small = cv2.resize(frame, (det_w, det_h), interpolation=cv2.INTER_AREA)
+            sx = 1.0 / scale
+            sy = 1.0 / scale
+
+        # Publish latest detection input (size-1 mailbox)
+        with shared_lock:
+            latest_det_input["img"] = small
+            latest_det_input["scale_x"] = sx
+            latest_det_input["scale_y"] = sy
+
+        # Draw last known boxes without blocking for inference
+        with shared_lock:
+            boxes_snapshot = list(latest_boxes)
+        for (x1, y1, x2, y2) in boxes_snapshot:
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 255), 2)
 
         # Overlay crosshair centered
         if cross is not None:

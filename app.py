@@ -128,7 +128,7 @@ def launch_detector(enable_crosshair: bool, color_hex: str) -> None:
     args = [
         "python3", os.path.join(BASE_DIR, "detector.py"),
         "--device", "/dev/video0",
-        "--model", "yolov11n.pt",
+        "--model", "yolo11n.pt",
         "--conf", "0.4",
         "--fullscreen", "1",
         "--window-title", "Jetson Overlay",

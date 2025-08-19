@@ -11,7 +11,7 @@ import numpy as np
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="YOLO detection overlay with optional crosshair")
     parser.add_argument("--device", type=str, default="/dev/video0", help="Video capture device path")
-    parser.add_argument("--model", type=str, default="yolov11n.pt", help="Ultralytics model path")
+    parser.add_argument("--model", type=str, default="yolo11n.pt", help="Ultralytics model path")
     parser.add_argument("--conf", type=float, default=0.4, help="Confidence threshold")
     parser.add_argument("--crosshair-enable", type=int, default=1, help="Enable crosshair (1/0)")
     parser.add_argument("--crosshair-color", type=str, default="#00ff00", help="Crosshair color hex, e.g. #00ff00")

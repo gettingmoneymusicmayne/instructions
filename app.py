@@ -148,26 +148,25 @@ def index():
 
         # Orchestrate processes based on selection
         if enable_detection:
-            # Use shm-decoupled display + detector for robust caps and low latency
+            # Use tee-based low-latency display (crosshair + display) + detector reading frames via shm
             stop_gst()
             stop_detector()
-            DISPLAY_CMD = [
-                "/bin/bash", os.path.join(BASE_DIR, "display_both.sh"),
-                "/dev/video0", "1920", "1080", "60"
+            gst_off_x, gst_off_y = offset_x, offset_y
+            display_cmd = [
+                "/bin/bash", os.path.join(BASE_DIR, "display_tee.sh"),
+                "/dev/video0", CROSSHAIR_PATH, str(gst_off_x), str(gst_off_y), "1920", "1080", "60"
             ]
-            DETECTOR_CMD = [
+            detector_cmd = [
                 "python3", os.path.join(BASE_DIR, "detector_shm.py"),
                 "--model", "yolo11n.pt",
                 "--conf", "0.4",
                 "--width", "1920", "--height", "1080", "--fps", "60",
+                "--crosshair", CROSSHAIR_PATH
             ]
-            if enable_crosshair:
-                DETECTOR_CMD.extend(["--crosshair", CROSSHAIR_PATH])
-            # Start detector first so overlay socket exists, then display connects
             global GST_PROC, DETECTOR_PROC
-            GST_PROC = subprocess.Popen(DISPLAY_CMD)
-            time.sleep(0.6)
-            DETECTOR_PROC = subprocess.Popen(DETECTOR_CMD)
+            GST_PROC = subprocess.Popen(display_cmd)
+            time.sleep(0.4)
+            DETECTOR_PROC = subprocess.Popen(detector_cmd)
         else:
             # Use gst overlay if only crosshair is desired
             stop_detector()
@@ -205,4 +204,3 @@ if __name__ == "__main__":
     finally:
         stop_detector()
         stop_gst()
-

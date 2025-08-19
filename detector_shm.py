@@ -62,17 +62,10 @@ def main():
         time.sleep(0.3)
 
     # SHM write (overlay frames)
-    writer = cv2.VideoWriter(
-        "appsrc is-live=true do-timestamp=true ! video/x-raw,format=BGRA,width=%d,height=%d,framerate=%d/1 ! "
-        "queue ! shmsink socket-path=/tmp/overlay_bgra wait-for-connection=false sync=false async=false" % (width, height, fps),
-        cv2.CAP_GSTREAMER,
-        0,
-        float(fps),
-        (width, height)
-    )
-    if not writer.isOpened():
-        print("Failed to open shared overlay writer", file=sys.stderr)
-        return 5
+    # We will paint the overlay into the display by drawing directly onto the captured frame copy
+    # and publishing it back is not needed since display draws crosshair already. Instead, we keep
+    # overlay separate and display reads only crosshair. For now, we will open a debug preview off.
+    writer = None
 
     cross = load_crosshair_bgra(args.crosshair, args.crosshair_scale)
 
@@ -124,10 +117,11 @@ def main():
                     roi[:, :, :3] = ch_crop[:, :, :3]
                     roi[:, :, 3] = 255
 
-        writer.write(overlay)
+        # No writer path; detection-only side effects for now
 
     cap.release()
-    writer.release()
+    if writer is not None:
+        writer.release()
     return 0
 
 

@@ -93,16 +93,16 @@ def main():
 
     # Prepare multiple pipeline options to handle different device formats
     pipeline_options = []
-    # 1) Raw caps (let kernel choose raw pixel format)
+    # 1) Raw caps locked to your device's advertised uncompressed mode
     pipeline_options.append(
         (
             "raw",
             (
-                f"v4l2src device={args.device} io-mode=2 ! "
+                f"v4l2src device={args.device} io-mode=0 ! "
                 f"video/x-raw,format=YUY2,width={args.width},height={args.height},framerate={args.fps}/1 ! "
                 f"queue leaky=downstream max-size-buffers=2 ! tee name=t "
-                f"t. ! queue leaky=downstream max-size-buffers=2 ! videoconvert ! video/x-raw,format=BGRA,width={args.width},height={args.height} ! cairooverlay name=overlay ! xvimagesink sync=false "
-                f"t. ! queue leaky=downstream max-size-buffers=2 ! videoconvert ! video/x-raw,format=BGR,width={args.width},height={args.height},framerate={args.fps}/1 ! appsink name=appsink caps=video/x-raw,format=BGR,width={args.width},height={args.height},framerate={args.fps}/1 drop=true max-buffers=1 emit-signals=true sync=false"
+                f"t. ! queue leaky=downstream max-size-buffers=2 ! videoconvert ! video/x-raw,format=BGRA ! cairooverlay name=overlay ! xvimagesink sync=false "
+                f"t. ! queue leaky=downstream max-size-buffers=2 ! videoconvert ! video/x-raw,format=BGR ! appsink name=appsink caps=video/x-raw,format=BGR drop=true max-buffers=1 emit-signals=true sync=false"
             ),
         )
     )
@@ -111,11 +111,11 @@ def main():
         (
             "mjpeg",
             (
-                f"v4l2src device={args.device} io-mode=2 ! "
+                f"v4l2src device={args.device} io-mode=0 ! "
                 f"image/jpeg,width={args.width},height={args.height},framerate={args.fps}/1 ! jpegdec ! "
                 f"queue leaky=downstream max-size-buffers=2 ! tee name=t "
-                f"t. ! queue leaky=downstream max-size-buffers=2 ! videoconvert ! video/x-raw,format=BGRA,width={args.width},height={args.height} ! cairooverlay name=overlay ! xvimagesink sync=false "
-                f"t. ! queue leaky=downstream max-size-buffers=2 ! videoconvert ! video/x-raw,format=BGR,width={args.width},height={args.height},framerate={args.fps}/1 ! appsink name=appsink caps=video/x-raw,format=BGR,width={args.width},height={args.height},framerate={args.fps}/1 drop=true max-buffers=1 emit-signals=true sync=false"
+                f"t. ! queue leaky=downstream max-size-buffers=2 ! videoconvert ! video/x-raw,format=BGRA ! cairooverlay name=overlay ! xvimagesink sync=false "
+                f"t. ! queue leaky=downstream max-size-buffers=2 ! videoconvert ! video/x-raw,format=BGR ! appsink name=appsink caps=video/x-raw,format=BGR drop=true max-buffers=1 emit-signals=true sync=false"
             ),
         )
     )
@@ -124,7 +124,7 @@ def main():
         (
             "auto",
             (
-                f"v4l2src device={args.device} io-mode=2 ! queue leaky=downstream max-size-buffers=2 ! tee name=t "
+                f"v4l2src device={args.device} io-mode=0 ! queue leaky=downstream max-size-buffers=2 ! tee name=t "
                 f"t. ! queue leaky=downstream max-size-buffers=2 ! videoconvert ! video/x-raw,format=BGRA ! cairooverlay name=overlay ! xvimagesink sync=false "
                 f"t. ! queue leaky=downstream max-size-buffers=2 ! videoconvert ! video/x-raw,format=BGR ! appsink name=appsink drop=true max-buffers=1 emit-signals=true sync=false"
             ),

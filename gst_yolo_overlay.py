@@ -28,8 +28,8 @@ class SharedState:
     def __init__(self):
         self.lock = threading.Lock()
         self.boxes = []  # list of (x1,y1,x2,y2,conf)
-        self.crosshair_surface = None  # cairo surface
-        self.frame_shape = (0, 0)
+        self.crosshair_bgra = None  # numpy BGRA
+        self.frame_shape = (1080, 1920)  # default
 
 
 def start_detection_thread(appsink, state: SharedState, model_path: str, conf: float):
@@ -78,10 +78,16 @@ def start_detection_thread(appsink, state: SharedState, model_path: str, conf: f
     t.start()
 
 
-def load_crosshair_surface(path: str):
-    import cairo
+def load_crosshair_bgra(path: str):
+    import cv2
     try:
-        return cairo.ImageSurface.create_from_png(path)
+        img = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+        if img is None:
+            return None
+        # Ensure BGRA
+        if img.shape[2] == 3:
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2BGRA)
+        return img
     except Exception:
         return None
 
@@ -91,7 +97,7 @@ def main():
     Gst.init(None)
     GObject.threads_init()
 
-    # Prepare multiple pipeline options to handle different device formats
+    # Prepare multiple pipeline options to handle different device formats, using compositor+appsrc
     pipeline_options = []
     # 1) Raw caps locked to your device's advertised uncompressed mode
     pipeline_options.append(
@@ -100,9 +106,13 @@ def main():
             (
                 f"v4l2src device={args.device} io-mode=0 ! "
                 f"video/x-raw,format=YUY2,width={args.width},height={args.height},framerate={args.fps}/1 ! "
-                f"queue leaky=downstream max-size-buffers=2 ! tee name=t "
-                f"t. ! queue leaky=downstream max-size-buffers=2 ! videoconvert ! video/x-raw,format=BGRA ! cairooverlay name=overlay ! xvimagesink sync=false "
-                f"t. ! queue leaky=downstream max-size-buffers=2 ! videoconvert ! video/x-raw,format=BGR ! appsink name=appsink caps=video/x-raw,format=BGR drop=true max-buffers=1 emit-signals=true sync=false"
+                f"queue leaky=downstream max-size-buffers=2 ! videoconvert ! video/x-raw,format=BGRA ! tee name=t "
+                # Display branch via compositor (sink_0)
+                f"t. ! queue leaky=downstream max-size-buffers=2 ! compositor name=comp sink_0::zorder=0 ! xvimagesink sync=false "
+                # Detection branch to appsink (BGR)
+                f"t. ! queue leaky=downstream max-size-buffers=2 ! videoconvert ! video/x-raw,format=BGR ! appsink name=appsink drop=true max-buffers=1 emit-signals=true sync=false "
+                # Appsrc overlay branch into compositor (sink_1)
+                f"appsrc name=boxes is-live=true format=time caps=video/x-raw,format=BGRA,width={args.width},height={args.height},framerate={args.fps}/1 ! queue ! comp."
             ),
         )
     )
@@ -112,10 +122,10 @@ def main():
             "mjpeg",
             (
                 f"v4l2src device={args.device} io-mode=0 ! "
-                f"image/jpeg,width={args.width},height={args.height},framerate={args.fps}/1 ! jpegdec ! "
-                f"queue leaky=downstream max-size-buffers=2 ! tee name=t "
-                f"t. ! queue leaky=downstream max-size-buffers=2 ! videoconvert ! video/x-raw,format=BGRA ! cairooverlay name=overlay ! xvimagesink sync=false "
-                f"t. ! queue leaky=downstream max-size-buffers=2 ! videoconvert ! video/x-raw,format=BGR ! appsink name=appsink caps=video/x-raw,format=BGR drop=true max-buffers=1 emit-signals=true sync=false"
+                f"image/jpeg,width={args.width},height={args.height},framerate={args.fps}/1 ! jpegdec ! videoconvert ! video/x-raw,format=BGRA ! tee name=t "
+                f"t. ! queue leaky=downstream max-size-buffers=2 ! compositor name=comp sink_0::zorder=0 ! xvimagesink sync=false "
+                f"t. ! queue leaky=downstream max-size-buffers=2 ! videoconvert ! video/x-raw,format=BGR ! appsink name=appsink drop=true max-buffers=1 emit-signals=true sync=false "
+                f"appsrc name=boxes is-live=true format=time caps=video/x-raw,format=BGRA,width={args.width},height={args.height},framerate={args.fps}/1 ! queue ! comp."
             ),
         )
     )
@@ -124,9 +134,10 @@ def main():
         (
             "auto",
             (
-                f"v4l2src device={args.device} io-mode=0 ! queue leaky=downstream max-size-buffers=2 ! tee name=t "
-                f"t. ! queue leaky=downstream max-size-buffers=2 ! videoconvert ! video/x-raw,format=BGRA ! cairooverlay name=overlay ! xvimagesink sync=false "
-                f"t. ! queue leaky=downstream max-size-buffers=2 ! videoconvert ! video/x-raw,format=BGR ! appsink name=appsink drop=true max-buffers=1 emit-signals=true sync=false"
+                f"v4l2src device={args.device} io-mode=0 ! queue leaky=downstream max-size-buffers=2 ! videoconvert ! video/x-raw,format=BGRA ! tee name=t "
+                f"t. ! queue leaky=downstream max-size-buffers=2 ! compositor name=comp sink_0::zorder=0 ! xvimagesink sync=false "
+                f"t. ! queue leaky=downstream max-size-buffers=2 ! videoconvert ! video/x-raw,format=BGR ! appsink name=appsink drop=true max-buffers=1 emit-signals=true sync=false "
+                f"appsrc name=boxes is-live=true format=time caps=video/x-raw,format=BGRA,width={args.width},height={args.height},framerate={args.fps}/1 ! queue ! comp."
             ),
         )
     )
@@ -167,36 +178,80 @@ def main():
 
     state = SharedState()
 
-    # Load crosshair surface
+    # Load crosshair image
     if args.crosshair:
-        state.crosshair_surface = load_crosshair_surface(args.crosshair)
+        state.crosshair_bgra = load_crosshair_bgra(args.crosshair)
 
     # Detection thread
     start_detection_thread(appsink, state, args.model, args.conf)
 
-    # cairooverlay callback
-    def on_draw(overlay_obj, context, timestamp, duration):  # noqa: ARG001
-        import cairo
-        # Draw boxes
+    # Get elements
+    comp = pipeline.get_by_name("comp")
+    appsrc_boxes = pipeline.get_by_name("boxes")
+
+    # Configure appsrc timing
+    appsrc_boxes.set_property("is-live", True)
+    appsrc_boxes.set_property("do-timestamp", True)
+    # Push overlay frames periodically
+    import cv2
+
+    def make_overlay_frame() -> bytes:
         with state.lock:
-            boxes = list(state.boxes)
             fh, fw = state.frame_shape
-            cross = state.crosshair_surface
-        context.set_source_rgba(1.0, 1.0, 0.0, 0.9)
-        context.set_line_width(3.0)
-        for x1, y1, x2, y2, conf in boxes:
-            context.rectangle(x1, y1, x2 - x1, y2 - y1)
-            context.stroke()
-        # Draw crosshair image centered
-        if cross is not None and fw > 0 and fh > 0:
-            ch_w = cross.get_width()
-            ch_h = cross.get_height()
+            boxes = list(state.boxes)
+            cross = state.crosshair_bgra
+        if fw <= 0 or fh <= 0:
+            fw, fh = 1920, 1080
+        # Transparent BGRA frame
+        frame = np.zeros((fh, fw, 4), dtype=np.uint8)
+        # Draw boxes in yellow with 80% alpha
+        for (x1, y1, x2, y2, _c) in boxes:
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 255, 200), 3)
+        # Overlay crosshair centered if present
+        if cross is not None:
+            ch = cross
+            ch_h, ch_w = ch.shape[:2]
             x = max(0, (fw - ch_w) // 2)
             y = max(0, (fh - ch_h) // 2)
-            context.set_source_surface(cross, x, y)
-            context.paint()
+            x2 = min(fw, x + ch_w)
+            y2 = min(fh, y + ch_h)
+            cw_eff = x2 - x
+            ch_eff = y2 - y
+            if cw_eff > 0 and ch_eff > 0:
+                roi = frame[y:y2, x:x2]
+                ch_crop = ch[0:ch_eff, 0:cw_eff]
+                if ch_crop.shape[2] == 4:
+                    overlay_rgb = ch_crop[:, :, :3].astype(np.float32)
+                    alpha = (ch_crop[:, :, 3:4].astype(np.float32)) / 255.0
+                    inv_alpha = 1.0 - alpha
+                    base_rgb = roi[:, :, :3].astype(np.float32)
+                    out_rgb = alpha * overlay_rgb + inv_alpha * base_rgb
+                    roi[:, :, :3] = out_rgb.astype(np.uint8)
+                    # Set alpha to max of existing and overlay alpha
+                    roi[:, :, 3] = np.maximum(roi[:, :, 3], ch_crop[:, :, 3])
+                else:
+                    roi[:, :, :3] = ch_crop[:, :, :3]
+                    roi[:, :, 3] = 255
+        return frame.tobytes()
 
-    overlay.connect("draw", on_draw)
+    def push_loop():
+        fps = max(1, args.fps)
+        frame_duration = Gst.util_uint64_scale_int(1, Gst.SECOND, fps)
+        timestamp = 0
+        while True:
+            data = make_overlay_frame()
+            buf = Gst.Buffer.new_allocate(None, len(data), None)
+            buf.fill(0, data)
+            buf.pts = timestamp
+            buf.dts = timestamp
+            buf.duration = frame_duration
+            ret = appsrc_boxes.emit("push-buffer", buf)
+            if ret != Gst.FlowReturn.OK:
+                time.sleep(0.01)
+            timestamp += frame_duration
+            time.sleep(0.001)
+
+    threading.Thread(target=push_loop, daemon=True).start()
 
     # Run
     bus = pipeline.get_bus()

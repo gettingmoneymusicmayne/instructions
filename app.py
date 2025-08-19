@@ -163,11 +163,11 @@ def index():
             ]
             if enable_crosshair:
                 DETECTOR_CMD.extend(["--crosshair", CROSSHAIR_PATH])
-            # Start display first so shmsink is listening
+            # Start detector first so overlay socket exists, then display connects
             global GST_PROC, DETECTOR_PROC
-            GST_PROC = subprocess.Popen(DISPLAY_CMD)
-            time.sleep(0.5)
             DETECTOR_PROC = subprocess.Popen(DETECTOR_CMD)
+            time.sleep(0.6)
+            GST_PROC = subprocess.Popen(DISPLAY_CMD)
         else:
             # Use gst overlay if only crosshair is desired
             stop_detector()

@@ -17,7 +17,7 @@ def parse_args():
     p.add_argument("--conf", type=float, default=0.4)
     p.add_argument("--crosshair", default="")
     p.add_argument("--imgsz", type=int, default=512, help="Inference size (short side), e.g., 320/416/512/640")
-    p.add_argument("--compute-device", default="0", help="Ultralytics device: 0 for CUDA GPU, 'cpu' for CPU")
+    p.add_argument("--compute_device", default="0", help="Ultralytics device: 0 for CUDA GPU, 'cpu' for CPU")
     p.add_argument("--half", type=int, default=1, help="Use FP16 on CUDA (1/0)")
     return p.parse_args()
 
@@ -54,10 +54,13 @@ def main() -> int:
     cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
     if not cap.isOpened():
         print("Failed to open capture with GStreamer pipeline. Falling back to V4L2.")
-        cap = cv2.VideoCapture(0, cv2.CAP_V4L2)
+        # Try device path first, then index 0
+        cap = cv2.VideoCapture(args.device, cv2.CAP_V4L2)
         if not cap.isOpened():
-            print("Failed to open video capture")
-            return 4
+            cap = cv2.VideoCapture(0, cv2.CAP_V4L2)
+            if not cap.isOpened():
+                print("Failed to open video capture")
+                return 4
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, args.width)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, args.height)
         cap.set(cv2.CAP_PROP_FPS, args.fps)
@@ -96,7 +99,7 @@ def main() -> int:
             "imgsz": args.imgsz,
         }
         # Device/precision preferences
-        if args.compute-device.lower() != "cpu":
+        if args.compute_device.lower() != "cpu":
             predict_kwargs["device"] = 0
             if args.half:
                 predict_kwargs["half"] = True

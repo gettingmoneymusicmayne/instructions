@@ -13,7 +13,6 @@ FPS="${4:-60}"
 
 # Clean old sockets
 rm -f /tmp/capture_bgr /tmp/overlay_bgra || true
-mkfifo /tmp/overlay_bgra || true
 
 gst-launch-1.0 -e \
   v4l2src device="$DEVICE" io-mode=0 ! \
@@ -23,5 +22,5 @@ gst-launch-1.0 -e \
   tee name=t \
   t. ! queue leaky=downstream max-size-buffers=1 ! compositor name=comp sink_0::zorder=0 ! videoconvert ! xvimagesink sync=false \
   t. ! queue leaky=downstream max-size-buffers=1 ! videoconvert ! video/x-raw,format=BGR ! shmsink socket-path=/tmp/capture_bgr shm-size=200000000 wait-for-connection=false sync=false async=false \
-  shmsrc socket-path=/tmp/overlay_bgra is-live=true do-timestamp=true ! video/x-raw,format=BGRA,width=$WIDTH,height=$HEIGHT,framerate=$FPS/1 ! queue ! comp.
+  shmsrc socket-path=/tmp/overlay_bgra is-live=true do-timestamp=true wait-for-connection=true ! video/x-raw,format=BGRA,width=$WIDTH,height=$HEIGHT,framerate=$FPS/1 ! queue ! comp.
 

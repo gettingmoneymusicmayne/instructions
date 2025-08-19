@@ -165,9 +165,9 @@ def index():
                 DETECTOR_CMD.extend(["--crosshair", CROSSHAIR_PATH])
             # Start detector first so overlay socket exists, then display connects
             global GST_PROC, DETECTOR_PROC
-            DETECTOR_PROC = subprocess.Popen(DETECTOR_CMD)
-            time.sleep(0.6)
             GST_PROC = subprocess.Popen(DISPLAY_CMD)
+            time.sleep(0.6)
+            DETECTOR_PROC = subprocess.Popen(DETECTOR_CMD)
         else:
             # Use gst overlay if only crosshair is desired
             stop_detector()

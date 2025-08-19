@@ -92,11 +92,15 @@ def main():
     GObject.threads_init()
 
     pipeline_desc = (
-        f"v4l2src device={args.device} io-mode=2 ! "
+        f"v4l2src device={args.device} ! "
         f"video/x-raw,format=YUY2,width={args.width},height={args.height},framerate={args.fps}/1 ! "
-        f"queue ! tee name=t "
-        f"t. ! queue ! videoconvert ! cairooverlay name=overlay ! xvimagesink sync=false "
-        f"t. ! queue ! videoconvert ! video/x-raw,format=BGR ! appsink name=appsink drop=true max-buffers=1 emit-signals=true sync=false"
+        f"queue leaky=2 max-size-buffers=1 ! tee name=t "
+        # Display branch: convert to BGRA for cairooverlay, then to sink
+        f"t. ! queue leaky=2 max-size-buffers=1 ! videoconvert ! video/x-raw,format=BGRA ! "
+        f"cairooverlay name=overlay ! xvimagesink sync=false "
+        # Appsink branch: BGR for OpenCV
+        f"t. ! queue leaky=2 max-size-buffers=1 ! videoconvert ! video/x-raw,format=BGR ! "
+        f"appsink name=appsink drop=true max-buffers=1 emit-signals=true sync=false"
     )
 
     pipeline = Gst.parse_launch(pipeline_desc)

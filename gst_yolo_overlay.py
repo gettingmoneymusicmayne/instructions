@@ -30,6 +30,9 @@ class SharedState:
         self.boxes = []  # list of (x1,y1,x2,y2,conf)
         self.crosshair_bgra = None  # numpy BGRA
         self.frame_shape = (1080, 1920)  # default
+        self.overlay_pipeline = None # Added for overlay pipeline
+        self.enhanced_pipeline = None # Added for enhanced display pipeline
+        self.detection_sink = None # Added for enhanced display pipeline
 
 
 def start_detection_thread(appsink, state: SharedState, model_path: str, conf: float):
@@ -40,7 +43,10 @@ def start_detection_thread(appsink, state: SharedState, model_path: str, conf: f
 
     def worker():
         while True:
-            sample = appsink.emit("try-pull-sample", 100000)
+            # Use enhanced detection sink if available, otherwise fall back to original
+            current_sink = getattr(state, 'detection_sink', None) or appsink
+            
+            sample = current_sink.emit("try-pull-sample", 100000)
             if sample is None:
                 continue
             buf = sample.get_buffer()
@@ -97,55 +103,51 @@ def main():
     Gst.init(None)
     GObject.threads_init()
 
-    # Prepare multiple pipeline options to handle different device formats, using compositor+appsrc
+    # Simplified pipeline that prevents "unknown" window issues
+    # Use a single display path with proper window naming
     pipeline_options = []
-    # 1) Raw caps locked to your device's advertised uncompressed mode
+    
+    # Option 1: Direct display with appsink for detection
     pipeline_options.append(
         (
-            "raw",
+            "direct",
             (
                 f"v4l2src device={args.device} io-mode=0 ! "
                 f"video/x-raw,format=YUY2,width={args.width},height={args.height},framerate={args.fps}/1 ! "
-                f"queue leaky=downstream max-size-buffers=2 ! videoconvert ! video/x-raw,format=BGRA ! tee name=t "
-                # Display branch via compositor (sink_0)
-                f"t. ! queue leaky=downstream max-size-buffers=2 ! compositor name=comp sink_0::zorder=0 ! xvimagesink sync=false "
+                f"queue leaky=downstream max-size-buffers=2 ! videoconvert ! video/x-raw,format=BGRA ! "
+                f"tee name=t "
+                # Display branch - direct to xvimagesink with proper naming
+                f"t. ! queue leaky=downstream max-size-buffers=2 ! "
+                f"xvimagesink name=display sync=false "
                 # Detection branch to appsink (BGR)
-                f"t. ! queue leaky=downstream max-size-buffers=2 ! videoconvert ! video/x-raw,format=BGR ! appsink name=appsink drop=true max-buffers=1 emit-signals=true sync=false "
-                # Appsrc overlay branch into compositor (sink_1)
-                f"appsrc name=boxes is-live=true format=time caps=video/x-raw,format=BGRA,width={args.width},height={args.height},framerate={args.fps}/1 ! queue ! comp."
+                f"t. ! queue leaky=downstream max-size-buffers=2 ! videoconvert ! video/x-raw,format=BGR ! "
+                f"appsink name=appsink drop=true max-buffers=1 emit-signals=true sync=false"
             ),
         )
     )
-    # 2) MJPEG decode path
+    
+    # Option 2: Fallback with MJPEG support
     pipeline_options.append(
         (
             "mjpeg",
             (
                 f"v4l2src device={args.device} io-mode=0 ! "
-                f"image/jpeg,width={args.width},height={args.height},framerate={args.fps}/1 ! jpegdec ! videoconvert ! video/x-raw,format=BGRA ! tee name=t "
-                f"t. ! queue leaky=downstream max-size-buffers=2 ! compositor name=comp sink_0::zorder=0 ! xvimagesink sync=false "
-                f"t. ! queue leaky=downstream max-size-buffers=2 ! videoconvert ! video/x-raw,format=BGR ! appsink name=appsink drop=true max-buffers=1 emit-signals=true sync=false "
-                f"appsrc name=boxes is-live=true format=time caps=video/x-raw,format=BGRA,width={args.width},height={args.height},framerate={args.fps}/1 ! queue ! comp."
-            ),
-        )
-    )
-    # 3) Minimal constraints
-    pipeline_options.append(
-        (
-            "auto",
-            (
-                f"v4l2src device={args.device} io-mode=0 ! queue leaky=downstream max-size-buffers=2 ! videoconvert ! video/x-raw,format=BGRA ! tee name=t "
-                f"t. ! queue leaky=downstream max-size-buffers=2 ! compositor name=comp sink_0::zorder=0 ! xvimagesink sync=false "
-                f"t. ! queue leaky=downstream max-size-buffers=2 ! videoconvert ! video/x-raw,format=BGR ! appsink name=appsink drop=true max-buffers=1 emit-signals=true sync=false "
-                f"appsrc name=boxes is-live=true format=time caps=video/x-raw,format=BGRA,width={args.width},height={args.height},framerate={args.fps}/1 ! queue ! comp."
+                f"image/jpeg,width={args.width},height={args.height},framerate={args.fps}/1 ! jpegdec ! "
+                f"videoconvert ! video/x-raw,format=BGRA ! "
+                f"tee name=t "
+                f"t. ! queue leaky=downstream max-size-buffers=2 ! "
+                f"xvimagesink name=display sync=false "
+                f"t. ! queue leaky=downstream max-size-buffers=2 ! videoconvert ! video/x-raw,format=BGR ! "
+                f"appsink name=appsink drop=true max-buffers=1 emit-signals=true sync=false"
             ),
         )
     )
 
     pipeline = None
     chosen = None
-    overlay = None
     appsink = None
+    display_sink = None
+    
     for name, desc in pipeline_options:
         try:
             candidate = Gst.parse_launch(desc)
@@ -162,7 +164,7 @@ def main():
                 continue
             # Success; finalize
             pipeline = candidate
-            overlay = pipeline.get_by_name("overlay")
+            display_sink = pipeline.get_by_name("display")
             appsink = pipeline.get_by_name("appsink")
             chosen = name
             break
@@ -172,8 +174,9 @@ def main():
             except Exception:
                 pass
             continue
+    
     if pipeline is None:
-        print("Failed to build a working pipeline (raw/mjpeg/auto). Check device and plugins.")
+        print("Failed to build a working pipeline. Check device and plugins.")
         return 5
 
     state = SharedState()
@@ -185,73 +188,138 @@ def main():
     # Detection thread
     start_detection_thread(appsink, state, args.model, args.conf)
 
-    # Get elements
-    comp = pipeline.get_by_name("comp")
-    appsrc_boxes = pipeline.get_by_name("boxes")
+    # Configure display sink properties to prevent unwanted windows
+    if display_sink:
+        try:
+            # Set window properties to prevent "unknown" window
+            display_sink.set_property("name", "YOLO_Display")
+            # Force fullscreen and above other windows
+            display_sink.set_property("force-aspect-ratio", False)
+        except Exception:
+            pass
 
-    # Configure appsrc timing
-    appsrc_boxes.set_property("is-live", True)
-    appsrc_boxes.set_property("do-timestamp", True)
-    # Push overlay frames periodically
-    import cv2
-
-    def make_overlay_frame() -> bytes:
-        with state.lock:
-            fh, fw = state.frame_shape
-            boxes = list(state.boxes)
-            cross = state.crosshair_bgra
-        if fw <= 0 or fh <= 0:
-            fw, fh = 1920, 1080
-        # Transparent BGRA frame
-        frame = np.zeros((fh, fw, 4), dtype=np.uint8)
-        # Draw boxes in yellow with 80% alpha
-        for (x1, y1, x2, y2, _c) in boxes:
-            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 255, 200), 3)
-        # Overlay crosshair centered if present
-        if cross is not None:
-            ch = cross
-            ch_h, ch_w = ch.shape[:2]
-            x = max(0, (fw - ch_w) // 2)
-            y = max(0, (fh - ch_h) // 2)
-            x2 = min(fw, x + ch_w)
-            y2 = min(fh, y + ch_h)
-            cw_eff = x2 - x
-            ch_eff = y2 - y
-            if cw_eff > 0 and ch_eff > 0:
-                roi = frame[y:y2, x:x2]
-                ch_crop = ch[0:ch_eff, 0:cw_eff]
-                if ch_crop.shape[2] == 4:
-                    overlay_rgb = ch_crop[:, :, :3].astype(np.float32)
-                    alpha = (ch_crop[:, :, 3:4].astype(np.float32)) / 255.0
-                    inv_alpha = 1.0 - alpha
-                    base_rgb = roi[:, :, :3].astype(np.float32)
-                    out_rgb = alpha * overlay_rgb + inv_alpha * base_rgb
-                    roi[:, :, :3] = out_rgb.astype(np.uint8)
-                    # Set alpha to max of existing and overlay alpha
-                    roi[:, :, 3] = np.maximum(roi[:, :, 3], ch_crop[:, :, 3])
-                else:
-                    roi[:, :, :3] = ch_crop[:, :, :3]
-                    roi[:, :, 3] = 255
-        return frame.tobytes()
-
-    def push_loop():
-        fps = max(1, args.fps)
-        frame_duration = Gst.util_uint64_scale_int(1, Gst.SECOND, fps)
-        timestamp = 0
-        while True:
-            data = make_overlay_frame()
-            buf = Gst.Buffer.new_allocate(None, len(data), None)
-            buf.fill(0, data)
-            buf.pts = timestamp
-            buf.dts = timestamp
-            buf.duration = frame_duration
-            ret = appsrc_boxes.emit("push-buffer", buf)
-            if ret != Gst.FlowReturn.OK:
-                time.sleep(0.01)
-            timestamp += frame_duration
-            time.sleep(0.001)
-
-    threading.Thread(target=push_loop, daemon=True).start()
+    # Create a modified pipeline that draws overlays directly on the video
+    # This prevents the "unknown" window by using a single display path
+    print("Creating enhanced display pipeline with overlays...")
+    
+    # Stop the current pipeline
+    pipeline.set_state(Gst.State.NULL)
+    
+    # Create new pipeline with overlay drawing
+    enhanced_pipeline_desc = (
+        f"v4l2src device={args.device} io-mode=0 ! "
+        f"video/x-raw,format=YUY2,width={args.width},height={args.height},framerate={args.fps}/1 ! "
+        f"queue leaky=downstream max-size-buffers=2 ! videoconvert ! video/x-raw,format=BGR ! "
+        f"tee name=t "
+        # Display branch with OpenCV processing
+        f"t. ! queue leaky=downstream max-size-buffers=2 ! "
+        f"videoconvert ! video/x-raw,format=RGB ! "
+        f"appsink name=display_sink drop=true max-buffers=1 emit-signals=true sync=false "
+        # Detection branch
+        f"t. ! queue leaky=downstream max-size-buffers=2 ! "
+        f"appsink name=detection_sink drop=true max-buffers=1 emit-signals=true sync=false"
+    )
+    
+    try:
+        enhanced_pipeline = Gst.parse_launch(enhanced_pipeline_desc)
+        display_sink = enhanced_pipeline.get_by_name("display_sink")
+        detection_sink = enhanced_pipeline.get_by_name("detection_sink")
+        
+        # Start the enhanced pipeline
+        enhanced_pipeline.set_state(Gst.State.PLAYING)
+        
+        # Wait for pipeline to start
+        time.sleep(0.5)
+        
+        # Function to process frames with overlays
+        def process_display_frames():
+            import cv2
+            
+            while True:
+                try:
+                    # Get frame from display sink
+                    sample = display_sink.emit("try-pull-sample", 100000)  # 100ms
+                    if sample is None:
+                        time.sleep(0.001)
+                        continue
+                    
+                    buf = sample.get_buffer()
+                    caps = sample.get_caps()
+                    structure = caps.get_structure(0)
+                    width = structure.get_value('width')
+                    height = structure.get_value('height')
+                    
+                    _, mapinfo = buf.map(Gst.MapFlags.READ)
+                    try:
+                        array = np.frombuffer(mapinfo.data, dtype=np.uint8)
+                        frame = array.reshape((height, width, 3))  # RGB
+                        frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+                    except Exception:
+                        buf.unmap(mapinfo)
+                        continue
+                    
+                    # Draw YOLO detection boxes
+                    with state.lock:
+                        boxes = list(state.boxes)
+                        cross = state.crosshair_bgra
+                    
+                    # Draw boxes in yellow
+                    for (x1, y1, x2, y2, _c) in boxes:
+                        cv2.rectangle(frame_bgr, (x1, y1), (x2, y2), (0, 255, 255), 3)
+                    
+                    # Overlay crosshair centered if present
+                    if cross is not None:
+                        ch_h, ch_w = cross.shape[:2]
+                        x = max(0, (width - ch_w) // 2)
+                        y = max(0, (height - ch_h) // 2)
+                        x2 = min(width, x + ch_w)
+                        y2 = min(height, y + ch_h)
+                        cw_eff = x2 - x
+                        ch_eff = y2 - y
+                        if cw_eff > 0 and ch_eff > 0:
+                            roi = frame_bgr[y:y2, x:x2]
+                            ch_crop = cross[0:ch_eff, 0:cw_eff]
+                            if ch_crop.shape[2] == 4:
+                                overlay_rgb = ch_crop[:, :, :3].astype(np.float32)
+                                alpha = (ch_crop[:, :, 3:4].astype(np.float32)) / 255.0
+                                inv_alpha = 1.0 - alpha
+                                base_rgb = roi[:, :, :3].astype(np.float32)
+                                out_rgb = alpha * overlay_rgb + inv_alpha * base_rgb
+                                roi[:, :, :3] = out_rgb.astype(np.uint8)
+                            else:
+                                roi[:, :, :3] = ch_crop[:, :, :3]
+                    
+                    # Display the frame with OpenCV (this will be the main display)
+                    cv2.imshow("YOLO Detection", frame_bgr)
+                    cv2.setWindowProperty("YOLO Detection", cv2.WND_PROP_FULLSCREEN, cv2.WND_PROP_FULLSCREEN)
+                    
+                    # Handle key events
+                    key = cv2.waitKey(1) & 0xFF
+                    if key == 27 or key == ord('q'):  # ESC or 'q'
+                        break
+                    
+                    buf.unmap(mapinfo)
+                    
+                except Exception as e:
+                    print(f"Display processing error: {e}")
+                    time.sleep(0.01)
+        
+        # Start display processing thread
+        display_thread = threading.Thread(target=process_display_frames, daemon=True)
+        display_thread.start()
+        
+        # Store enhanced pipeline for cleanup
+        state.enhanced_pipeline = enhanced_pipeline
+        
+        # Update detection thread to use new sink
+        state.detection_sink = detection_sink
+        
+    except Exception as e:
+        print(f"Failed to create enhanced pipeline: {e}")
+        print("Falling back to basic display...")
+        # Restart original pipeline
+        pipeline.set_state(Gst.State.PLAYING)
+        state.enhanced_pipeline = None
 
     # Run
     bus = pipeline.get_bus()
@@ -272,10 +340,55 @@ def main():
 
     loop = GLib.MainLoop()
     pipeline.set_state(Gst.State.PLAYING)
+    
+    # Wait a moment for the pipeline to start
+    time.sleep(0.5)
+    
+    # Try to set window properties after pipeline is running
+    if display_sink:
+        try:
+            # Use wmctrl to find and control the window
+            import subprocess
+            import time
+            
+            # Wait for window to appear
+            for _ in range(10):
+                try:
+                    result = subprocess.run(['wmctrl', '-l'], capture_output=True, text=True, timeout=2)
+                    if 'YOLO_Display' in result.stdout or 'gst-launch' in result.stdout:
+                        break
+                except Exception:
+                    pass
+                time.sleep(0.2)
+            
+            # Try to set fullscreen and above other windows
+            try:
+                subprocess.run(['wmctrl', '-r', 'YOLO_Display', '-b', 'add,fullscreen,above'], 
+                             capture_output=True, timeout=2)
+            except Exception:
+                # Fallback: try to find any gst-launch window
+                try:
+                    result = subprocess.run(['wmctrl', '-l'], capture_output=True, text=True, timeout=2)
+                    for line in result.stdout.splitlines():
+                        if 'gst-launch' in line:
+                            window_id = line.split()[0]
+                            subprocess.run(['wmctrl', '-i', '-r', window_id, '-b', 'add,fullscreen,above'], 
+                                         capture_output=True, timeout=2)
+                            break
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    
     try:
         loop.run()
     finally:
-        pipeline.set_state(Gst.State.NULL)
+        # Clean up all pipelines
+        if state.enhanced_pipeline:
+            state.enhanced_pipeline.set_state(Gst.State.NULL)
+        else:
+            pipeline.set_state(Gst.State.NULL)
+        cv2.destroyAllWindows()
 
 
 if __name__ == "__main__":

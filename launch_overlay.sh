@@ -54,15 +54,15 @@ gst-launch-1.0 -e \
   tee name=t \
   t. ! queue leaky=downstream max-size-buffers=1 ! \
       video/x-raw,format=BGR,width=${WIDTH},height=${HEIGHT},framerate=${FPS}/1 ! \
-      shmsink socket-path=${CAPTURE_SOCK} shm-size=200000000 wait-for-connection=false sync=false async=false \
+      shmsink socket-path=${CAPTURE_SOCK} shm-size=300000000 wait-for-connection=true sync=false async=false \
   t. ! queue leaky=downstream max-size-buffers=1 ! \
       videoconvert ! video/x-raw,format=BGRA ! \
-      compositor name=comp background=1 sink_1::alpha=1.0 \
+      compositor name=comp background=1 \
       ! queue leaky=downstream max-size-buffers=1 ! videoconvert ! ${SINK} sync=false \
   shmsrc socket-path=${OVERLAY_SOCK} do-timestamp=true is-live=true \
       ! video/x-raw,format=BGRA,width=${WIDTH},height=${HEIGHT},framerate=${FPS}/1 \
       ! queue leaky=downstream max-size-buffers=1 ! comp. \
-  >/dev/null 2>&1 &
+  &
 
 # Give it time to start
 sleep 1.5

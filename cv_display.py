@@ -181,7 +181,7 @@ def main() -> int:
 
     # Open capture (from shm)
     cap = None
-    for _ in range(40):
+    for _ in range(120):
         cap = cv2.VideoCapture(
             f"shmsrc socket-path={CAPTURE_SOCK} do-timestamp=true is-live=true ! "
             f"video/x-raw,format=BGR,width={width},height={height},framerate={fps}/1 ! "

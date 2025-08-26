@@ -1,8 +1,6 @@
 Flask>=2.2
-Pillow>=9.0
 ultralytics>=8.2.0
+numpy>=1.21.0
 # For OpenCV, prefer the system package on Jetson: sudo apt install -y python3-opencv
 # If you really want a pip wheel (may not be optimized for Jetson):
 # opencv-python>=4.7.0
-PyGObject>=3.44
-numpy>=1.21.0

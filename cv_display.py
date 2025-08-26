@@ -2,6 +2,7 @@
 """
 Gaming Overlay System - AI Detection with Custom Crosshair
 Handles video capture, YOLO person detection, and crosshair overlay with customizable colors.
+Optimized for Jetson: CUDA/FP16 when available, optional TensorRT engine, input resizing, and frame skipping.
 """
 
 import argparse
@@ -20,12 +21,16 @@ def parse_args():
     parser.add_argument("--width", type=int, default=1920, help="Capture width")
     parser.add_argument("--height", type=int, default=1080, help="Capture height")
     parser.add_argument("--fps", type=int, default=60, help="Target FPS")
-    parser.add_argument("--model", default="yolov11n.pt", help="YOLO model path")
+    parser.add_argument("--model", default="yolov11n.pt", help="YOLO model path or .engine")
     parser.add_argument("--conf", type=float, default=0.4, help="Detection confidence")
+    parser.add_argument("--imgsz", type=int, default=640, help="Inference size (short side)")
+    parser.add_argument("--max-det", type=int, default=50, help="Max detections per image")
+    parser.add_argument("--skip", type=int, default=2, help="Run detection every N frames (>=1)")
     parser.add_argument("--crosshair", default="", help="Crosshair image path")
     parser.add_argument("--crosshair-color", default="0,255,0", help="Crosshair color (BGR)")
     parser.add_argument("--detection-color", default="0,255,255", help="Detection box color (BGR)")
     parser.add_argument("--crosshair-scale", type=float, default=1.0, help="Crosshair scale")
+    parser.add_argument("--no-label", action="store_true", help="Do not draw confidence labels")
     return parser.parse_args()
 
 
@@ -34,7 +39,7 @@ def parse_bgr_color(color_str: str) -> tuple:
     try:
         b, g, r = map(int, color_str.split(','))
         return (b, g, r)
-    except:
+    except Exception:
         return (0, 255, 0)  # Default green
 
 
@@ -54,15 +59,11 @@ def load_crosshair_bgra(path: str, scale: float = 1.0, color: tuple = (0, 255, 0
         
         # Recolor the crosshair if needed
         if color != (0, 255, 0):  # If not default green
-            # Create a mask from the alpha channel
             alpha = img[:, :, 3]
             mask = alpha > 0
-            
-            # Apply new color to non-transparent pixels
             img[mask, 0] = color[0]  # Blue
             img[mask, 1] = color[1]  # Green
             img[mask, 2] = color[2]  # Red
-            # Keep original alpha
         
         # Scale if needed
         if scale != 1.0:
@@ -127,6 +128,62 @@ def draw_crosshair_simple(frame: np.ndarray, color: tuple, thickness: int = 2, g
     cv2.line(frame, (cx, cy + gap), (cx, cy + length), color, thickness)
 
 
+def select_device_and_dtype(model):
+    """Configure device (CUDA if available) and dtype (FP16 when possible)."""
+    try:
+        import torch
+        cuda = torch.cuda.is_available()
+        if cuda:
+            model.to('cuda')
+            # Half precision speeds up on Jetson GPUs
+            try:
+                model.model.half()
+            except Exception:
+                pass
+            # Enable CUDNN autotuner
+            try:
+                torch.backends.cudnn.benchmark = True
+            except Exception:
+                pass
+            return 'cuda', True
+        else:
+            return 'cpu', False
+    except Exception:
+        return 'cpu', False
+
+
+def run_inference(model, frame_bgr: np.ndarray, imgsz: int, conf: float, max_det: int, use_half: bool):
+    """Run YOLO inference on a frame; returns list of boxes and confs."""
+    import cv2  # local for safety
+    rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+    # Ultralytics handles resizing; we pass numpy directly
+    results = model.predict(
+        rgb,
+        verbose=False,
+        conf=conf,
+        classes=[0],  # person
+        imgsz=imgsz,
+        max_det=max_det,
+        device=0 if use_half else None,
+        
+    )
+    boxes, confs = [], None
+    if results and len(results) > 0:
+        res = results[0]
+        if hasattr(res, 'boxes') and res.boxes is not None and res.boxes.xyxy is not None:
+            boxes = res.boxes.xyxy
+            try:
+                boxes = boxes.detach().float().cpu().numpy().astype(int)
+            except Exception:
+                boxes = res.boxes.xyxy.cpu().numpy().astype(int)
+            if res.boxes.conf is not None:
+                try:
+                    confs = res.boxes.conf.detach().float().cpu().numpy()
+                except Exception:
+                    confs = res.boxes.conf.cpu().numpy()
+    return boxes, confs
+
+
 def main() -> int:
     args = parse_args()
     
@@ -138,8 +195,9 @@ def main() -> int:
     print(f"📹 Device: {args.device}", file=sys.stderr)
     print(f"🎯 Crosshair: {args.crosshair}", file=sys.stderr)
     print(f"🤖 Model: {args.model}", file=sys.stderr)
+    print(f"🖼️  Inference size: {args.imgsz}, Skip: {args.skip}", file=sys.stderr)
     
-    # Load YOLO model
+    # Load YOLO model (TensorRT engine .engine is supported by Ultralytics)
     try:
         from ultralytics import YOLO
         model = YOLO(args.model)
@@ -147,6 +205,10 @@ def main() -> int:
     except Exception as e:
         print(f"❌ Failed to load YOLO model: {e}", file=sys.stderr)
         return 1
+    
+    # Select device and dtype
+    device, use_half = select_device_and_dtype(model)
+    print(f"🧠 Device: {device}, FP16: {use_half}", file=sys.stderr)
     
     # Load crosshair
     crosshair_img = None
@@ -219,10 +281,15 @@ def main() -> int:
     
     # Performance tracking
     frame_count = 0
-    start_time = time.time()
-    last_fps_time = start_time
+    last_fps_time = time.time()
     
     print(f"🚀 Starting overlay loop...", file=sys.stderr)
+    
+    # Cache last detections to reuse on skipped frames
+    last_boxes, last_confs = [], None
+    
+    # Ensure valid skip
+    skip_n = max(1, int(args.skip))
     
     while running:
         ok, frame = cap.read()
@@ -230,34 +297,29 @@ def main() -> int:
             time.sleep(0.001)
             continue
         
-        # YOLO detection (person detection only)
-        try:
-            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            results = model.predict(rgb, verbose=False, conf=args.conf, classes=[0])  # class 0 = person
-            
-            # Draw detection boxes
-            if results and len(results) > 0 and results[0].boxes is not None and results[0].boxes.xyxy is not None:
-                b = results[0].boxes
-                xyxy = b.xyxy.cpu().numpy().astype(int)
-                confs = b.conf.cpu().numpy() if b.conf is not None else None
-                
-                for i, (x1, y1, x2, y2) in enumerate(xyxy):
-                    # Draw bounding box
-                    cv2.rectangle(frame, (x1, y1), (x2, y2), detection_color, 2)
-                    
-                    # Draw confidence label
-                    if confs is not None:
-                        conf_text = f"Person {confs[i]:.2f}"
-                        cv2.putText(frame, conf_text, (x1, max(0, y1 - 6)), 
-                                  cv2.FONT_HERSHEY_SIMPLEX, 0.5, detection_color, 1, cv2.LINE_AA)
-        except Exception as e:
-            print(f"⚠️  Detection error: {e}", file=sys.stderr)
+        # Decide whether to run detection this frame
+        do_detect = (frame_count % skip_n) == 0
+        if do_detect:
+            try:
+                boxes, confs = run_inference(model, frame, args.imgsz, args.conf, args.max_det, use_half)
+                last_boxes, last_confs = boxes, confs
+            except Exception as e:
+                # Keep previous detections if inference fails transiently
+                print(f"⚠️  Detection error: {e}", file=sys.stderr)
+        
+        # Draw detection boxes (use last known if skipping)
+        if last_boxes is not None and len(last_boxes) > 0:
+            for i, (x1, y1, x2, y2) in enumerate(last_boxes):
+                cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), detection_color, 2)
+                if (not args.no_label) and last_confs is not None and i < len(last_confs):
+                    conf_text = f"{last_confs[i]:.2f}"
+                    cv2.putText(frame, conf_text, (int(x1), max(0, int(y1) - 6)), 
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, detection_color, 1, cv2.LINE_AA)
         
         # Draw crosshair
         if crosshair_img is not None:
             overlay_crosshair_image(frame, crosshair_img)
         else:
-            # Fallback to simple crosshair
             draw_crosshair_simple(frame, crosshair_color, thickness=2, gap=12, length=50)
         
         # Display frame
@@ -270,12 +332,12 @@ def main() -> int:
         
         # FPS calculation
         frame_count += 1
-        current_time = time.time()
-        if current_time - last_fps_time >= 1.0:
-            fps = frame_count / (current_time - last_fps_time)
+        now = time.time()
+        if now - last_fps_time >= 1.0:
+            fps = frame_count / (now - last_fps_time)
             print(f"📊 FPS: {fps:.1f}", file=sys.stderr)
             frame_count = 0
-            last_fps_time = current_time
+            last_fps_time = now
     
     # Cleanup
     cap.release()

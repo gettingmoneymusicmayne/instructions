@@ -2,7 +2,7 @@ import os
 import time
 import signal
 import subprocess
-from typing import Optional
+from typing import Optional, List, Tuple
 
 from flask import Flask, render_template_string, request, redirect, url_for
 
@@ -21,9 +21,8 @@ CROSSHAIR_PATH = os.path.join(BASE_DIR, "crosshair.png")
 LAUNCH_SCRIPT = os.path.join(BASE_DIR, "launch_overlay.sh")
 CV_DISPLAY_SCRIPT = os.path.join(BASE_DIR, "cv_display.py")
 
-# Runtime process handles
-DISPLAY_PROC: Optional[subprocess.Popen] = None
-PUBLISHER_PROC: Optional[subprocess.Popen] = None
+# Runtime process handle
+OVERLAY_PROC: Optional[subprocess.Popen] = None
 
 
 HTML = """
@@ -135,26 +134,26 @@ HTML = """
 """
 
 
-def stop_all_procs() -> None:
-    global DISPLAY_PROC, PUBLISHER_PROC
+def stop_overlay() -> None:
+    global OVERLAY_PROC
     try:
         subprocess.run(["pkill", "-f", "cv_display.py"], check=False)
-        subprocess.run(["pkill", "-f", "gst-launch-1.0"], check=False)
-        subprocess.run(["pkill", "-f", "launch_overlay.sh"], check=False)
     except Exception:
         pass
-    for proc in (PUBLISHER_PROC, DISPLAY_PROC):
-        if proc is not None:
+    if OVERLAY_PROC is not None:
+        try:
+            OVERLAY_PROC.terminate()
+            t0 = time.time()
+            while OVERLAY_PROC.poll() is None and time.time() - t0 < 1.0:
+                time.sleep(0.05)
+            if OVERLAY_PROC.poll() is None:
+                OVERLAY_PROC.kill()
+        except Exception:
             try:
-                proc.send_signal(signal.SIGTERM)
-                proc.wait(timeout=2)
+                OVERLAY_PROC.kill()
             except Exception:
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
-    DISPLAY_PROC = None
-    PUBLISHER_PROC = None
+                pass
+    OVERLAY_PROC = None
 
 
 def hex_to_bgr(color_hex: str) -> str:
@@ -165,26 +164,85 @@ def hex_to_bgr(color_hex: str) -> str:
     return f"{b},{g},{r}"
 
 
-def launch_pipeline(enable_crosshair: bool, enable_detection: bool, crosshair_hex: str, detect_hex: str) -> None:
-    global DISPLAY_PROC, PUBLISHER_PROC
-    stop_all_procs()
+# Best-model selection (.engine preferred, then smallest variant n>s>m>l>x)
+from typing import List
 
-    # Start display pipeline (60fps compositor)
-    DISPLAY_PROC = subprocess.Popen(["/bin/bash", LAUNCH_SCRIPT, DEVICE, str(WIDTH), str(HEIGHT), str(FPS)])
-    time.sleep(1.0)
+def find_candidate_models(search_dirs: List[str]) -> List[str]:
+    candidates: List[str] = []
+    exts = (".engine", ".pt")
+    for d in search_dirs:
+        try:
+            for name in os.listdir(d):
+                lower = name.lower()
+                if lower.endswith(exts) and ("yolo" in lower or "yolov" in lower):
+                    candidates.append(os.path.join(d, name))
+        except Exception:
+            continue
+    return candidates
 
-    # Start overlay publisher (our cv_display.py)
+
+def size_rank_from_name(name: str) -> int:
+    lower = name.lower()
+    order = ["n", "s", "m", "l", "x"]
+    for i, tag in enumerate(order):
+        if f"v11{tag}" in lower or f"v{tag}" in lower or lower.endswith(f"{tag}.pt") or lower.endswith(f"{tag}.engine"):
+            return i
+    return len(order)
+
+
+def pick_best_model(paths: List[str]) -> str:
+    def score(p: str):
+        lower = p.lower()
+        ext = os.path.splitext(lower)[1]
+        ext_priority = 0 if ext == ".engine" else 1
+        size_rank = size_rank_from_name(lower)
+        return (ext_priority, size_rank, len(lower))
+    if not paths:
+        return os.path.join(BASE_DIR, "yolov11n.pt")
+    return sorted(paths, key=score)[0]
+
+
+def select_best_ultralytics_model() -> str:
+    home = os.path.expanduser("~")
+    search_dirs = [
+        BASE_DIR,
+        os.path.join(BASE_DIR, "models"),
+        os.path.join(home, "models"),
+        home,
+    ]
+    return pick_best_model(find_candidate_models(search_dirs))
+
+
+def launch_overlay(enable_crosshair: bool, enable_detection: bool, crosshair_hex: str, detect_hex: str) -> str:
+    global OVERLAY_PROC
+    stop_overlay()
+
+    model_path = select_best_ultralytics_model()
+    # Tuned defaults for smooth, low-latency feel
     args = [
         "python3", CV_DISPLAY_SCRIPT,
-        "--width", str(WIDTH), "--height", str(HEIGHT), "--fps", str(FPS),
-        "--imgsz", "480", "--skip", "2", "--conf", "0.35",
-        "--detection-color", hex_to_bgr(detect_hex),
+        "--device", DEVICE,
+        "--model", model_path,
+        "--conf", "0.42",
+        "--width", str(WIDTH),
+        "--height", str(HEIGHT),
+        "--fps", str(FPS),
+        "--imgsz", "480",
+        "--ai-fps", "24",
+        "--persist-ms", "220",
+        "--max-det", "30",
+        "--no-label",
     ]
     if enable_crosshair and os.path.exists(CROSSHAIR_PATH):
-        args.extend(["--crosshair", CROSSHAIR_PATH, "--crosshair-color", hex_to_bgr(crosshair_hex)])
-    if not enable_detection:
+        args.extend(["--crosshair", CROSSHAIR_PATH,
+                    "--crosshair-color", hex_to_bgr(crosshair_hex)])
+    if enable_detection:
+        args.extend(["--detection-color", hex_to_bgr(detect_hex)])
+    else:
         args.append("--no-detect")
-    PUBLISHER_PROC = subprocess.Popen(args)
+
+    OVERLAY_PROC = subprocess.Popen(args)
+    return model_path
 
 
 @app.route("/", methods=["GET", "POST"])
@@ -199,15 +257,16 @@ def index():
         detection_color = request.form.get("detection_color", "#ffff00")
 
         try:
-            launch_pipeline(enable_crosshair, enable_detection, crosshair_color, detection_color)
+            model_used = launch_overlay(enable_crosshair, enable_detection, crosshair_color, detection_color)
+            base_msg = f"✅ Using model: {os.path.basename(model_used)}"
             if enable_crosshair and enable_detection:
-                status_message = "✅ Crosshair + AI detection running at 60fps render"
+                status_message = base_msg + " | Crosshair + AI detection launched"
             elif enable_crosshair:
-                status_message = "✅ Crosshair overlay running at 60fps render"
+                status_message = base_msg + " | Crosshair overlay launched"
             elif enable_detection:
-                status_message = "✅ AI detection running at 60fps render"
+                status_message = base_msg + " | AI detection launched"
             else:
-                status_message = "✅ All stopped"
+                status_message = "✅ All overlays stopped"
         except Exception as e:
             status_message = f"❌ Error: {e}"
             status_class = "error"
@@ -234,8 +293,8 @@ def index():
 
 
 @app.route("/stop")
-def stop_route():
-    stop_all_procs()
+def stop_all():
+    stop_overlay()
     return redirect(url_for("index", msg="🛑 Stopped", cls="success"))
 
 
@@ -243,6 +302,7 @@ if __name__ == "__main__":
     try:
         print("🎮 Gaming Overlay Control starting...")
         print("📱 Web UI: http://localhost:5000")
+        print("💡 Best perf: place yolov11n.engine in project root or ./models/")
         app.run(host="0.0.0.0", port=5000, debug=False, use_reloader=False)
     finally:
-        stop_all_procs()
+        stop_overlay()

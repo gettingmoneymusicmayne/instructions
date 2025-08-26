@@ -8,8 +8,15 @@ set -euo pipefail
 CROSSHAIR_PATH="${1:-}" 
 OFFSET_X="${2:-948}"
 OFFSET_Y="${3:-528}"
+DEVICE="${4:-/dev/video0}"
+
 if [ -z "$CROSSHAIR_PATH" ] || [ ! -f "$CROSSHAIR_PATH" ]; then
   echo "Crosshair image not found or not provided: $CROSSHAIR_PATH" >&2
+  exit 1
+fi
+
+if [ ! -e "$DEVICE" ]; then
+  echo "Video device not found: $DEVICE" >&2
   exit 1
 fi
 
@@ -21,7 +28,7 @@ unclutter >/dev/null 2>&1 &
 
 # Start the GStreamer pipeline with the specified crosshair overlay
 gst-launch-1.0 \
-  v4l2src device=/dev/video0 ! \
+  v4l2src device="$DEVICE" ! \
   "video/x-raw,format=YUY2,width=1920,height=1080,framerate=60/1" ! \
   videoconvert ! \
   gdkpixbufoverlay location="$CROSSHAIR_PATH" offset-x=$OFFSET_X offset-y=$OFFSET_Y ! \

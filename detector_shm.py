@@ -9,7 +9,7 @@ import cv2
 
 def parse_args():
     p = argparse.ArgumentParser("YOLO detection from shm, overlay to shm")
-    p.add_argument("--model", default="yolo11n.pt")
+    p.add_argument("--model", default="yolov11n.pt")
     p.add_argument("--conf", type=float, default=0.4)
     p.add_argument("--width", type=int, default=1920)
     p.add_argument("--height", type=int, default=1080)

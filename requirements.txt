@@ -5,3 +5,4 @@ ultralytics>=8.2.0
 # If you really want a pip wheel (may not be optimized for Jetson):
 # opencv-python>=4.7.0
 PyGObject>=3.44
+numpy>=1.21.0

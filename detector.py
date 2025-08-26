@@ -11,7 +11,7 @@ import numpy as np
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="YOLO detection overlay with optional crosshair")
     parser.add_argument("--device", type=str, default="/dev/video0", help="Video capture device path")
-    parser.add_argument("--model", type=str, default="yolo11n.pt", help="Ultralytics model path")
+    parser.add_argument("--model", type=str, default="yolov11n.pt", help="Ultralytics model path")
     parser.add_argument("--conf", type=float, default=0.4, help="Confidence threshold")
     parser.add_argument("--crosshair-enable", type=int, default=1, help="Enable crosshair (1/0)")
     parser.add_argument("--crosshair-color", type=str, default="#00ff00", help="Crosshair color hex, e.g. #00ff00")
@@ -90,23 +90,50 @@ def main() -> int:
     # Load model
     try:
         model = YOLO(args.model)
+        print(f"Loaded YOLO model: {args.model}", file=sys.stderr)
     except Exception as ex:  # noqa: BLE001
         print(f"Failed to load model {args.model}: {ex}", file=sys.stderr)
         return 3
 
-    # Prefer GStreamer pipeline for reliable formats
-    pipeline = build_gst_pipeline(args.device, args.width, args.height, args.fps)
-    cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
-    if not cap.isOpened():
-        # Fallback to V4L2 direct
-        print("GStreamer capture failed, falling back to V4L2", file=sys.stderr)
-        cap = cv2.VideoCapture(0, cv2.CAP_V4L2)
-        if not cap.isOpened():
-            print("Failed to open video capture", file=sys.stderr)
-            return 4
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, args.width)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, args.height)
-        cap.set(cv2.CAP_PROP_FPS, args.fps)
+    # Try multiple capture methods
+    cap = None
+    
+    # Method 1: GStreamer pipeline
+    try:
+        pipeline = build_gst_pipeline(args.device, args.width, args.height, args.fps)
+        cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
+        if cap.isOpened():
+            print(f"Using GStreamer pipeline for {args.device}", file=sys.stderr)
+    except Exception as e:
+        print(f"GStreamer capture failed: {e}", file=sys.stderr)
+    
+    # Method 2: Direct V4L2
+    if not cap or not cap.isOpened():
+        try:
+            cap = cv2.VideoCapture(args.device, cv2.CAP_V4L2)
+            if cap.isOpened():
+                cap.set(cv2.CAP_PROP_FRAME_WIDTH, args.width)
+                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, args.height)
+                cap.set(cv2.CAP_PROP_FPS, args.fps)
+                print(f"Using V4L2 direct capture for {args.device}", file=sys.stderr)
+        except Exception as e:
+            print(f"V4L2 capture failed: {e}", file=sys.stderr)
+    
+    # Method 3: Fallback to device 0
+    if not cap or not cap.isOpened():
+        try:
+            cap = cv2.VideoCapture(0, cv2.CAP_V4L2)
+            if cap.isOpened():
+                cap.set(cv2.CAP_PROP_FRAME_WIDTH, args.width)
+                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, args.height)
+                cap.set(cv2.CAP_PROP_FPS, args.fps)
+                print("Using fallback V4L2 capture (device 0)", file=sys.stderr)
+        except Exception as e:
+            print(f"Fallback capture failed: {e}", file=sys.stderr)
+    
+    if not cap or not cap.isOpened():
+        print("Failed to open video capture with all methods", file=sys.stderr)
+        return 4
 
     # Window setup
     if args.display:

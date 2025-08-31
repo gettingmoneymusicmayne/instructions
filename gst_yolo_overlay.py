@@ -18,7 +18,7 @@ def parse_args():
     p.add_argument("--width", type=int, default=1920)
     p.add_argument("--height", type=int, default=1080)
     p.add_argument("--fps", type=int, default=60)
-    p.add_argument("--model", default="yolo11n.pt")
+    p.add_argument("--model", default="yolov11n.pt")
     p.add_argument("--crosshair", default="")
     p.add_argument("--conf", type=float, default=0.4)
     return p.parse_args()

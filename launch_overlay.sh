@@ -47,21 +47,21 @@ unclutter >/dev/null 2>&1 &
 echo "🚀 Starting GStreamer tee + compositor pipeline..." >&2
 
 gst-launch-1.0 -e \
-  v4l2src device="$DEVICE" io-mode=0 ! \
-  "video/x-raw,format=YUY2,width=${WIDTH},height=${HEIGHT},framerate=${FPS}/1" ! \
+  v4l2src device="$DEVICE" io-mode=2 ! \
+  "video/x-raw,format=NV12,width=${WIDTH},height=${HEIGHT},framerate=${FPS}/1" ! \
   queue leaky=downstream max-size-buffers=1 ! \
-  videoconvert ! video/x-raw,format=BGR ! \
   tee name=t \
   t. ! queue leaky=downstream max-size-buffers=1 ! \
-      video/x-raw,format=BGR,width=${WIDTH},height=${HEIGHT},framerate=${FPS}/1 ! \
-      shmsink socket-path=${CAPTURE_SOCK} shm-size=300000000 wait-for-connection=true sync=false async=false \
-  t. ! queue leaky=downstream max-size-buffers=1 ! \
-      videoconvert ! video/x-raw,format=BGRA ! \
-      compositor name=comp background=1 \
-      ! queue leaky=downstream max-size-buffers=1 ! videoconvert ! ${SINK} sync=false \
+      nvvidconv ! "video/x-raw(memory:NVMM),format=NV12,width=${WIDTH},height=${HEIGHT},framerate=${FPS}/1" ! \
+      nvcompositor name=nvc sink_0::zorder=0 ! \
+      ${SINK} sync=false qos=false \
   shmsrc socket-path=${OVERLAY_SOCK} do-timestamp=true is-live=true \
       ! video/x-raw,format=BGRA,width=${WIDTH},height=${HEIGHT},framerate=${FPS}/1 \
-      ! queue leaky=downstream max-size-buffers=1 ! comp. \
+      ! queue leaky=downstream max-size-buffers=1 ! nvvidconv ! "video/x-raw(memory:NVMM),format=RGBA" ! \
+      nvc. \
+  t. ! queue leaky=downstream max-size-buffers=1 ! \
+      nvvidconv ! video/x-raw,format=BGR ! \
+      shmsink socket-path=${CAPTURE_SOCK} shm-size=300000000 wait-for-connection=true sync=false async=false \
   &
 
 # Give it time to start

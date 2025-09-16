@@ -39,6 +39,7 @@ def parse_args():
     p.add_argument("--crosshair-scale", type=float, default=1.0)
     p.add_argument("--no-label", action="store_true")
     p.add_argument("--no-detect", action="store_true")
+    p.add_argument("--no-display", action="store_true", help="Run headless without opening a window")
     return p.parse_args()
 
 
@@ -199,9 +200,10 @@ def main() -> int:
 
     # Low-latency capture pipeline
     pipeline = (
-        f"v4l2src device={args.device} io-mode=0 ! "
-        f"video/x-raw,format=YUY2,width={args.width},height={args.height},framerate={args.fps}/1 ! "
+        f"v4l2src device={args.device} io-mode=2 ! "
+        f"video/x-raw,format=NV12,width={args.width},height={args.height},framerate={args.fps}/1 ! "
         f"queue leaky=downstream max-size-buffers=1 ! "
+        f"nvvidconv ! video/x-raw,format=BGRx ! "
         f"videoconvert ! video/x-raw,format=BGR ! "
         f"appsink drop=true max-buffers=1 sync=false"
     )
@@ -216,9 +218,10 @@ def main() -> int:
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, args.height)
         cap.set(cv2.CAP_PROP_FPS, args.fps)
 
-    # Window
-    cv2.namedWindow("Gaming Overlay", cv2.WINDOW_NORMAL)
-    cv2.setWindowProperty("Gaming Overlay", cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+    # Window (optional)
+    if not args.no_display:
+        cv2.namedWindow("Gaming Overlay", cv2.WINDOW_NORMAL)
+        cv2.setWindowProperty("Gaming Overlay", cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
 
     det_color = parse_bgr(args.detection_color)
     cross_color = parse_bgr(args.crosshair_color)
@@ -270,7 +273,8 @@ def main() -> int:
     while running:
         ok, frame = cap.read()
         if not ok or frame is None:
-            # No sleep to keep responsiveness; minimal backoff
+            # Minimal backoff to avoid 100% CPU when the device stalls
+            time.sleep(0.001)
             continue
 
         # Publish latest frame for AI (no lock, overwrite latest)
@@ -292,9 +296,10 @@ def main() -> int:
         # Crosshair
         overlay_crosshair(frame, crosshair_img, cross_color)
 
-        cv2.imshow("Gaming Overlay", frame)
-        if (cv2.waitKey(1) & 0xFF) in (27, ord('q')):
-            break
+        if not args.no_display:
+            cv2.imshow("Gaming Overlay", frame)
+            if (cv2.waitKey(1) & 0xFF) in (27, ord('q')):
+                break
 
         frames += 1
         now = time.time()
@@ -307,7 +312,8 @@ def main() -> int:
     if worker is not None:
         worker.join(timeout=1.0)
     cap.release()
-    cv2.destroyAllWindows()
+    if not args.no_display:
+        cv2.destroyAllWindows()
     print("✅ Stopped", file=sys.stderr)
     return 0
 

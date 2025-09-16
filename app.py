@@ -3,13 +3,14 @@ import time
 import signal
 import subprocess
 from typing import Optional, List, Tuple
+import re
 
 from flask import Flask, render_template_string, request, redirect, url_for
 
 
 app = Flask(__name__)
 
-# Config
+# Config (defaults; can be overridden per-request)
 WIDTH = int(os.getenv("OVERLAY_WIDTH", "1920"))
 HEIGHT = int(os.getenv("OVERLAY_HEIGHT", "1080"))
 FPS = int(os.getenv("OVERLAY_FPS", "60"))
@@ -20,6 +21,7 @@ BASE_DIR = os.getcwd()
 CROSSHAIR_PATH = os.path.join(BASE_DIR, "crosshair.png")
 LAUNCH_SCRIPT = os.path.join(BASE_DIR, "launch_overlay.sh")
 CV_DISPLAY_SCRIPT = os.path.join(BASE_DIR, "cv_display.py")
+GST_OVERLAY_SCRIPT = os.path.join(BASE_DIR, "gst_yolo_overlay.py")
 
 # Runtime process handle
 OVERLAY_PROC: Optional[subprocess.Popen] = None
@@ -114,6 +116,38 @@ HTML = """
                 </div>
             </div>
 
+            <div class="form-group">
+                <label>Video Source:</label>
+                <div class="color-group">
+                    <label for="device">Device:</label>
+                    <input type="text" name="device" id="device" value="%DEVICE%" style="flex:1; padding:8px; border-radius:6px; border:none;">
+                </div>
+                <div class="color-group">
+                    <label for="width">Width:</label>
+                    <input type="number" name="width" id="width" value="%WIDTH%" min="320" max="7680" step="1" style="width:120px; padding:8px; border-radius:6px; border:none;">
+                    <label for="height">Height:</label>
+                    <input type="number" name="height" id="height" value="%HEIGHT%" min="240" max="4320" step="1" style="width:120px; padding:8px; border-radius:6px; border:none;">
+                    <label for="fps">FPS:</label>
+                    <select name="fps" id="fps" style="padding:8px; border-radius:6px; border:none;">
+                        %FPS_OPTIONS%
+                    </select>
+                </div>
+            </div>
+
+            <div class="form-group">
+                <label>Backend:</label>
+                <div class="checkbox-group">
+                    <div class="checkbox-item">
+                        <input type="radio" name="backend" value="gst" id="b_gst" %B_GST%>
+                        <label for="b_gst">GStreamer EGL (best for 120 Hz)</label>
+                    </div>
+                    <div class="checkbox-item">
+                        <input type="radio" name="backend" value="cv" id="b_cv" %B_CV%>
+                        <label for="b_cv">OpenCV Window (simple)</label>
+                    </div>
+                </div>
+            </div>
+
             <div class="button-group">
                 <button type="submit">Apply & Launch</button>
                 <a href="/stop" class="stop-btn" style="text-decoration: none; display: flex; align-items: center; justify-content: center;">Stop All</a>
@@ -156,12 +190,55 @@ def stop_overlay() -> None:
     OVERLAY_PROC = None
 
 
+def _clamp_channel(value: int) -> int:
+    return max(0, min(255, int(value)))
+
+
 def hex_to_bgr(color_hex: str) -> str:
-    if not color_hex.startswith('#'):
-        color_hex = '#' + color_hex
-    hh = color_hex.lstrip('#')
-    r, g, b = tuple(int(hh[i:i+2], 16) for i in (0, 2, 4))
-    return f"{b},{g},{r}"
+    """Parse a color string and return B,G,R CSV suitable for OpenCV.
+
+    Accepts:
+    - #RRGGBB or RRGGBB
+    - #RGB (shorthand) or RGB
+    - "r,g,b" (CSV, 0-255)
+    - "rgb(r,g,b)"
+
+    Falls back to bright green (0,255,0) on invalid input.
+    """
+    if not color_hex:
+        return "0,255,0"
+
+    s = str(color_hex).strip()
+
+    # CSV forms first: r,g,b or rgb(r,g,b)
+    m = re.match(r"^rgb\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})\s*\)$", s, re.IGNORECASE)
+    if m:
+        r, g, b = (_clamp_channel(int(m.group(1))), _clamp_channel(int(m.group(2))), _clamp_channel(int(m.group(3))))
+        return f"{b},{g},{r}"
+    if "," in s:
+        parts = s.split(",")
+        if len(parts) == 3:
+            try:
+                r, g, b = (_clamp_channel(int(parts[0])), _clamp_channel(int(parts[1])), _clamp_channel(int(parts[2])))
+                return f"{b},{g},{r}"
+            except Exception:
+                pass
+
+    # Hex forms: #RRGGBB, RRGGBB, #RGB, RGB
+    hs = s.lstrip('#')
+    if len(hs) == 3 and all(c in "0123456789aAbBcCdDeEfF" for c in hs):
+        hs = ''.join(c * 2 for c in hs)
+    if len(hs) == 6 and all(c in "0123456789aAbBcCdDeEfF" for c in hs):
+        try:
+            r = int(hs[0:2], 16)
+            g = int(hs[2:4], 16)
+            b = int(hs[4:6], 16)
+            return f"{b},{g},{r}"
+        except Exception:
+            pass
+
+    # Fallback
+    return "0,255,0"
 
 
 # Best-model selection (.engine preferred, then smallest variant n>s>m>l>x)
@@ -198,7 +275,8 @@ def pick_best_model(paths: List[str]) -> str:
         size_rank = size_rank_from_name(lower)
         return (ext_priority, size_rank, len(lower))
     if not paths:
-        return os.path.join(BASE_DIR, "yolov11n.pt")
+        # Return a bare model name so Ultralytics can auto-download to its cache
+        return "yolov11n.pt"
     return sorted(paths, key=score)[0]
 
 
@@ -213,35 +291,67 @@ def select_best_ultralytics_model() -> str:
     return pick_best_model(find_candidate_models(search_dirs))
 
 
-def launch_overlay(enable_crosshair: bool, enable_detection: bool, crosshair_hex: str, detect_hex: str) -> str:
+def launch_overlay(enable_crosshair: bool, enable_detection: bool, crosshair_hex: str, detect_hex: str,
+                   device: str, width: int, height: int, fps: int, backend: str) -> str:
     global OVERLAY_PROC
     stop_overlay()
 
-    model_path = select_best_ultralytics_model()
-    # Tuned defaults for smooth, low-latency feel
-    args = [
-        "python3", CV_DISPLAY_SCRIPT,
-        "--device", DEVICE,
-        "--model", model_path,
-        "--conf", "0.42",
-        "--width", str(WIDTH),
-        "--height", str(HEIGHT),
-        "--fps", str(FPS),
-        "--imgsz", "480",
-        "--ai-fps", "24",
-        "--persist-ms", "220",
-        "--max-det", "30",
-        "--no-label",
-    ]
-    if enable_crosshair and os.path.exists(CROSSHAIR_PATH):
-        args.extend(["--crosshair", CROSSHAIR_PATH,
-                    "--crosshair-color", hex_to_bgr(crosshair_hex)])
-    if enable_detection:
-        args.extend(["--detection-color", hex_to_bgr(detect_hex)])
-    else:
-        args.append("--no-detect")
+    if not os.path.exists(CV_DISPLAY_SCRIPT):
+        raise FileNotFoundError(f"Display script not found: {CV_DISPLAY_SCRIPT}")
+    if not os.path.exists(GST_OVERLAY_SCRIPT):
+        raise FileNotFoundError(f"GStreamer script not found: {GST_OVERLAY_SCRIPT}")
 
-    OVERLAY_PROC = subprocess.Popen(args)
+    model_path = select_best_ultralytics_model()
+    # Choose backend
+    if backend == "gst":
+        # Use GStreamer-based overlay (best for 120 Hz)
+        args = [
+            "python3", GST_OVERLAY_SCRIPT,
+            "--device", device,
+            "--model", model_path,
+            "--conf", "0.42",
+            "--width", str(width),
+            "--height", str(height),
+            "--fps", str(fps),
+        ]
+        if enable_crosshair and os.path.exists(CROSSHAIR_PATH):
+            args.extend(["--crosshair", CROSSHAIR_PATH])
+        if not enable_detection:
+            # gst path always draws boxes when detection thread runs; no-detect means skip thread
+            # emulate via conf=1.0 with classes none is cumbersome, so fallback to cv path when no-detect requested
+            backend = "cv"
+    if backend != "gst":
+        # OpenCV-based path (simple, may cap at display refresh)
+        args = [
+            "python3", CV_DISPLAY_SCRIPT,
+            "--device", device,
+            "--model", model_path,
+            "--conf", "0.42",
+            "--width", str(width),
+            "--height", str(height),
+            "--fps", str(fps),
+            "--imgsz", "480",
+            "--ai-fps", "24",
+            "--persist-ms", "220",
+            "--max-det", "30",
+            "--no-label",
+        ]
+        if enable_crosshair and os.path.exists(CROSSHAIR_PATH):
+            args.extend(["--crosshair", CROSSHAIR_PATH,
+                        "--crosshair-color", hex_to_bgr(crosshair_hex)])
+        if enable_detection:
+            args.extend(["--detection-color", hex_to_bgr(detect_hex)])
+        else:
+            args.append("--no-detect")
+        if os.getenv("OVERLAY_NO_DISPLAY", "0").lower() in ("1", "true", "yes"):
+            args.append("--no-display")
+
+    try:
+        OVERLAY_PROC = subprocess.Popen(args)
+    except FileNotFoundError as e:
+        raise RuntimeError(f"Failed to start overlay process (python3 or script missing): {e}") from e
+    except Exception as e:
+        raise RuntimeError(f"Failed to start overlay process: {e}") from e
     return model_path
 
 
@@ -255,9 +365,22 @@ def index():
         enable_detection = request.form.get("enable_detection") == "on"
         crosshair_color = request.form.get("crosshair_color", "#00ff00")
         detection_color = request.form.get("detection_color", "#ffff00")
+        device = request.form.get("device", DEVICE)
+        try:
+            width = int(request.form.get("width", str(WIDTH)))
+            height = int(request.form.get("height", str(HEIGHT)))
+            fps_sel = int(request.form.get("fps", str(FPS)))
+        except Exception:
+            width, height, fps_sel = WIDTH, HEIGHT, FPS
+        backend = request.form.get("backend", "gst")
 
         try:
-            model_used = launch_overlay(enable_crosshair, enable_detection, crosshair_color, detection_color)
+            # Warn if crosshair requested but missing image
+            warnings: List[str] = []
+            if enable_crosshair and not os.path.exists(CROSSHAIR_PATH):
+                warnings.append("Crosshair image not found; showing default lines instead")
+            model_used = launch_overlay(enable_crosshair, enable_detection, crosshair_color, detection_color,
+                                        device, width, height, fps_sel, backend)
             base_msg = f"✅ Using model: {os.path.basename(model_used)}"
             if enable_crosshair and enable_detection:
                 status_message = base_msg + " | Crosshair + AI detection launched"
@@ -267,6 +390,8 @@ def index():
                 status_message = base_msg + " | AI detection launched"
             else:
                 status_message = "✅ All overlays stopped"
+            if warnings:
+                status_message += " | " + "; ".join(warnings)
         except Exception as e:
             status_message = f"❌ Error: {e}"
             status_class = "error"
@@ -274,12 +399,18 @@ def index():
         return redirect(url_for("index",
                                ec=int(enable_crosshair), ed=int(enable_detection),
                                cc=crosshair_color, dc=detection_color,
+                               dev=device, w=str(width), h=str(height), f=str(fps_sel), be=backend,
                                msg=status_message, cls=status_class))
 
     ec = request.args.get("ec", default="0")
     ed = request.args.get("ed", default="0")
     cc = request.args.get("cc", default="#00ff00")
     dc = request.args.get("dc", default="#ffff00")
+    dev = request.args.get("dev", default=DEVICE)
+    w = int(request.args.get("w", default=str(WIDTH)))
+    h = int(request.args.get("h", default=str(HEIGHT)))
+    f = int(request.args.get("f", default=str(FPS)))
+    be = request.args.get("be", default="gst")
     status_message = request.args.get("msg", default="Ready")
     status_class = request.args.get("cls", default="success")
 
@@ -287,6 +418,18 @@ def index():
     html = html.replace("%ENABLE_DETECTION%", "checked" if ed == "1" else "")
     html = html.replace("%CROSSHAIR_COLOR%", cc)
     html = html.replace("%DETECTION_COLOR%", dc)
+    # Device/Resolution/FPS
+    html = html.replace("%DEVICE%", dev)
+    html = html.replace("%WIDTH%", str(w))
+    html = html.replace("%HEIGHT%", str(h))
+    fps_options = []
+    for opt in (30, 60, 120):
+        sel = "selected" if f == opt else ""
+        fps_options.append(f"<option value=\"{opt}\" {sel}>{opt}</option>")
+    html = html.replace("%FPS_OPTIONS%", "".join(fps_options))
+    # Backend radios
+    html = html.replace("%B_GST%", "checked" if be == "gst" else "")
+    html = html.replace("%B_CV%", "checked" if be == "cv" else "")
     html = html.replace("%STATUS_MESSAGE%", status_message)
     html = html.replace("%STATUS_CLASS%", status_class)
     return render_template_string(html)

@@ -96,7 +96,7 @@ Switch your monitor to DisplayPort to see the overlay in action. The original vi
 
 ### Video Settings
 - **Resolution**: 1920x1080 (configurable in code)
-- **FPS**: 60 FPS target
+- **FPS**: 60 FPS target (120 Hz supported; see below)
 - **Device**: `/dev/video0` (capture card)
 
 ### AI Settings
@@ -109,6 +109,34 @@ Switch your monitor to DisplayPort to see the overlay in action. The original vi
 - Adjust confidence threshold based on your needs
 - Monitor FPS in terminal output
 - Close unnecessary applications for best performance
+- For 120 Hz passthrough, prefer NV12 zero-copy and `nveglglessink`
+
+### 120 Hz Ultra Low-Latency Display (No Overlays)
+
+To maximize throughput on Jetson, keep frames in NV12 and use the EGL sink:
+
+```bash
+chmod +x launch_120hz.sh
+./launch_120hz.sh /dev/video0 1920 1080 120
+```
+
+This path uses:
+- `v4l2src io-mode=2` (DMABUF when available)
+- `NV12` end-to-end with `nvvidconv` to `NVMM`
+- `nveglglessink` with `sync=false qos=false` to minimize latency
+
+### 120 Hz Composite + AI (Advanced)
+
+The existing `launch_overlay.sh` is optimized to:
+- Keep a display path in NV12 → `nveglglessink` for minimal latency
+- Tee a branch to BGR via `nvvidconv` → `shmsink` for AI consumption
+- Accept BGRA overlay frames via `shmsrc` for compositor integration
+
+Run at 120 Hz by passing `120` as the FPS argument:
+
+```bash
+./launch_overlay.sh /dev/video0 1920 1080 120
+```
 
 ## 🛠️ Troubleshooting
 

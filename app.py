@@ -3,6 +3,7 @@ import time
 import signal
 import subprocess
 from typing import Optional, List, Tuple
+import re
 
 from flask import Flask, render_template_string, request, redirect, url_for
 
@@ -156,12 +157,55 @@ def stop_overlay() -> None:
     OVERLAY_PROC = None
 
 
+def _clamp_channel(value: int) -> int:
+    return max(0, min(255, int(value)))
+
+
 def hex_to_bgr(color_hex: str) -> str:
-    if not color_hex.startswith('#'):
-        color_hex = '#' + color_hex
-    hh = color_hex.lstrip('#')
-    r, g, b = tuple(int(hh[i:i+2], 16) for i in (0, 2, 4))
-    return f"{b},{g},{r}"
+    """Parse a color string and return B,G,R CSV suitable for OpenCV.
+
+    Accepts:
+    - #RRGGBB or RRGGBB
+    - #RGB (shorthand) or RGB
+    - "r,g,b" (CSV, 0-255)
+    - "rgb(r,g,b)"
+
+    Falls back to bright green (0,255,0) on invalid input.
+    """
+    if not color_hex:
+        return "0,255,0"
+
+    s = str(color_hex).strip()
+
+    # CSV forms first: r,g,b or rgb(r,g,b)
+    m = re.match(r"^rgb\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})\s*\)$", s, re.IGNORECASE)
+    if m:
+        r, g, b = (_clamp_channel(int(m.group(1))), _clamp_channel(int(m.group(2))), _clamp_channel(int(m.group(3))))
+        return f"{b},{g},{r}"
+    if "," in s:
+        parts = s.split(",")
+        if len(parts) == 3:
+            try:
+                r, g, b = (_clamp_channel(int(parts[0])), _clamp_channel(int(parts[1])), _clamp_channel(int(parts[2])))
+                return f"{b},{g},{r}"
+            except Exception:
+                pass
+
+    # Hex forms: #RRGGBB, RRGGBB, #RGB, RGB
+    hs = s.lstrip('#')
+    if len(hs) == 3 and all(c in "0123456789aAbBcCdDeEfF" for c in hs):
+        hs = ''.join(c * 2 for c in hs)
+    if len(hs) == 6 and all(c in "0123456789aAbBcCdDeEfF" for c in hs):
+        try:
+            r = int(hs[0:2], 16)
+            g = int(hs[2:4], 16)
+            b = int(hs[4:6], 16)
+            return f"{b},{g},{r}"
+        except Exception:
+            pass
+
+    # Fallback
+    return "0,255,0"
 
 
 # Best-model selection (.engine preferred, then smallest variant n>s>m>l>x)
@@ -217,6 +261,9 @@ def launch_overlay(enable_crosshair: bool, enable_detection: bool, crosshair_hex
     global OVERLAY_PROC
     stop_overlay()
 
+    if not os.path.exists(CV_DISPLAY_SCRIPT):
+        raise FileNotFoundError(f"Display script not found: {CV_DISPLAY_SCRIPT}")
+
     model_path = select_best_ultralytics_model()
     # Tuned defaults for smooth, low-latency feel
     args = [
@@ -241,7 +288,16 @@ def launch_overlay(enable_crosshair: bool, enable_detection: bool, crosshair_hex
     else:
         args.append("--no-detect")
 
-    OVERLAY_PROC = subprocess.Popen(args)
+    # Allow headless operation for CI/testing
+    if os.getenv("OVERLAY_NO_DISPLAY", "0").lower() in ("1", "true", "yes"): 
+        args.append("--no-display")
+
+    try:
+        OVERLAY_PROC = subprocess.Popen(args)
+    except FileNotFoundError as e:
+        raise RuntimeError(f"Failed to start overlay process (python3 or script missing): {e}") from e
+    except Exception as e:
+        raise RuntimeError(f"Failed to start overlay process: {e}") from e
     return model_path
 
 
@@ -257,6 +313,10 @@ def index():
         detection_color = request.form.get("detection_color", "#ffff00")
 
         try:
+            # Warn if crosshair requested but missing image
+            warnings: List[str] = []
+            if enable_crosshair and not os.path.exists(CROSSHAIR_PATH):
+                warnings.append("Crosshair image not found; showing default lines instead")
             model_used = launch_overlay(enable_crosshair, enable_detection, crosshair_color, detection_color)
             base_msg = f"✅ Using model: {os.path.basename(model_used)}"
             if enable_crosshair and enable_detection:
@@ -267,6 +327,8 @@ def index():
                 status_message = base_msg + " | AI detection launched"
             else:
                 status_message = "✅ All overlays stopped"
+            if warnings:
+                status_message += " | " + "; ".join(warnings)
         except Exception as e:
             status_message = f"❌ Error: {e}"
             status_class = "error"

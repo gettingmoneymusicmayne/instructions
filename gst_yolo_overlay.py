@@ -102,17 +102,17 @@ def main():
     # 1) Raw caps locked to your device's advertised uncompressed mode
     pipeline_options.append(
         (
-            "raw",
+            "nv12-nvmm",
             (
-                f"v4l2src device={args.device} io-mode=0 ! "
-                f"video/x-raw,format=YUY2,width={args.width},height={args.height},framerate={args.fps}/1 ! "
-                f"queue leaky=downstream max-size-buffers=2 ! videoconvert ! video/x-raw,format=BGRA ! tee name=t "
-                # Display branch via compositor (sink_0)
-                f"t. ! queue leaky=downstream max-size-buffers=2 ! compositor name=comp sink_0::zorder=0 ! xvimagesink sync=false "
+                f"v4l2src device={args.device} io-mode=2 ! "
+                f"video/x-raw,format=NV12,width={args.width},height={args.height},framerate={args.fps}/1 ! "
+                f"queue leaky=downstream max-size-buffers=2 ! tee name=t "
+                # Display via NVMM to nveglglessink
+                f"t. ! queue leaky=downstream max-size-buffers=2 ! nvvidconv ! video/x-raw(memory:NVMM),format=NV12 ! nveglglessink sync=false qos=false "
                 # Detection branch to appsink (BGR)
-                f"t. ! queue leaky=downstream max-size-buffers=2 ! videoconvert ! video/x-raw,format=BGR ! appsink name=appsink drop=true max-buffers=1 emit-signals=true sync=false "
-                # Appsrc overlay branch into compositor (sink_1)
-                f"appsrc name=boxes is-live=true format=time caps=video/x-raw,format=BGRA,width={args.width},height={args.height},framerate={args.fps}/1 ! queue ! comp."
+                f"t. ! queue leaky=downstream max-size-buffers=2 ! nvvidconv ! video/x-raw,format=BGRx ! videoconvert ! video/x-raw,format=BGR ! appsink name=appsink drop=true max-buffers=1 emit-signals=true sync=false "
+                # Appsrc overlay branch composited to display path using compositor + fakesink to anchor
+                f"appsrc name=boxes is-live=true format=time caps=video/x-raw,format=BGRA,width={args.width},height={args.height},framerate={args.fps}/1 ! queue ! videoconvert ! compositor name=comp background=1 ! fakesink async=false"
             ),
         )
     )
@@ -122,10 +122,10 @@ def main():
             "mjpeg",
             (
                 f"v4l2src device={args.device} io-mode=0 ! "
-                f"image/jpeg,width={args.width},height={args.height},framerate={args.fps}/1 ! jpegdec ! videoconvert ! video/x-raw,format=BGRA ! tee name=t "
-                f"t. ! queue leaky=downstream max-size-buffers=2 ! compositor name=comp sink_0::zorder=0 ! xvimagesink sync=false "
-                f"t. ! queue leaky=downstream max-size-buffers=2 ! videoconvert ! video/x-raw,format=BGR ! appsink name=appsink drop=true max-buffers=1 emit-signals=true sync=false "
-                f"appsrc name=boxes is-live=true format=time caps=video/x-raw,format=BGRA,width={args.width},height={args.height},framerate={args.fps}/1 ! queue ! comp."
+                f"image/jpeg,width={args.width},height={args.height},framerate={args.fps}/1 ! jpegdec ! videoconvert ! video/x-raw,format=NV12 ! tee name=t "
+                f"t. ! queue leaky=downstream max-size-buffers=2 ! nvvidconv ! video/x-raw(memory:NVMM),format=NV12 ! nveglglessink sync=false qos=false "
+                f"t. ! queue leaky=downstream max-size-buffers=2 ! nvvidconv ! video/x-raw,format=BGRx ! videoconvert ! video/x-raw,format=BGR ! appsink name=appsink drop=true max-buffers=1 emit-signals=true sync=false "
+                f"appsrc name=boxes is-live=true format=time caps=video/x-raw,format=BGRA,width={args.width},height={args.height},framerate={args.fps}/1 ! queue ! videoconvert ! compositor name=comp background=1 ! fakesink async=false"
             ),
         )
     )
@@ -134,10 +134,10 @@ def main():
         (
             "auto",
             (
-                f"v4l2src device={args.device} io-mode=0 ! queue leaky=downstream max-size-buffers=2 ! videoconvert ! video/x-raw,format=BGRA ! tee name=t "
-                f"t. ! queue leaky=downstream max-size-buffers=2 ! compositor name=comp sink_0::zorder=0 ! xvimagesink sync=false "
-                f"t. ! queue leaky=downstream max-size-buffers=2 ! videoconvert ! video/x-raw,format=BGR ! appsink name=appsink drop=true max-buffers=1 emit-signals=true sync=false "
-                f"appsrc name=boxes is-live=true format=time caps=video/x-raw,format=BGRA,width={args.width},height={args.height},framerate={args.fps}/1 ! queue ! comp."
+                f"v4l2src device={args.device} io-mode=2 ! queue leaky=downstream max-size-buffers=2 ! videoconvert ! video/x-raw,format=NV12 ! tee name=t "
+                f"t. ! queue leaky=downstream max-size-buffers=2 ! nvvidconv ! video/x-raw(memory:NVMM),format=NV12 ! nveglglessink sync=false qos=false "
+                f"t. ! queue leaky=downstream max-size-buffers=2 ! nvvidconv ! video/x-raw,format=BGRx ! videoconvert ! video/x-raw,format=BGR ! appsink name=appsink drop=true max-buffers=1 emit-signals=true sync=false "
+                f"appsrc name=boxes is-live=true format=time caps=video/x-raw,format=BGRA,width={args.width},height={args.height},framerate={args.fps}/1 ! queue ! videoconvert ! compositor name=comp background=1 ! fakesink async=false"
             ),
         )
     )

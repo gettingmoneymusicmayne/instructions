@@ -200,9 +200,10 @@ def main() -> int:
 
     # Low-latency capture pipeline
     pipeline = (
-        f"v4l2src device={args.device} io-mode=0 ! "
-        f"video/x-raw,format=YUY2,width={args.width},height={args.height},framerate={args.fps}/1 ! "
+        f"v4l2src device={args.device} io-mode=2 ! "
+        f"video/x-raw,format=NV12,width={args.width},height={args.height},framerate={args.fps}/1 ! "
         f"queue leaky=downstream max-size-buffers=1 ! "
+        f"nvvidconv ! video/x-raw,format=BGRx ! "
         f"videoconvert ! video/x-raw,format=BGR ! "
         f"appsink drop=true max-buffers=1 sync=false"
     )

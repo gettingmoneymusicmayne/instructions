@@ -53,15 +53,15 @@ gst-launch-1.0 -e \
   tee name=t \
   t. ! queue leaky=downstream max-size-buffers=1 ! \
       nvvidconv ! "video/x-raw(memory:NVMM),format=NV12,width=${WIDTH},height=${HEIGHT},framerate=${FPS}/1" ! \
+      nvcompositor name=nvc sink_0::zorder=0 ! \
       ${SINK} sync=false qos=false \
+  shmsrc socket-path=${OVERLAY_SOCK} do-timestamp=true is-live=true \
+      ! video/x-raw,format=BGRA,width=${WIDTH},height=${HEIGHT},framerate=${FPS}/1 \
+      ! queue leaky=downstream max-size-buffers=1 ! nvvidconv ! "video/x-raw(memory:NVMM),format=RGBA" ! \
+      nvc. \
   t. ! queue leaky=downstream max-size-buffers=1 ! \
       nvvidconv ! video/x-raw,format=BGR ! \
       shmsink socket-path=${CAPTURE_SOCK} shm-size=300000000 wait-for-connection=true sync=false async=false \
-  shmsrc socket-path=${OVERLAY_SOCK} do-timestamp=true is-live=true \
-      ! video/x-raw,format=BGRA,width=${WIDTH},height=${HEIGHT},framerate=${FPS}/1 \
-      ! queue leaky=downstream max-size-buffers=1 ! videoconvert ! \
-      compositor name=comp background=1 ! \
-      fakesink async=false \
   &
 
 # Give it time to start
